@@ -135,15 +135,16 @@ jobs:
         run: cargo tauri build --bundles ${{ matrix.bundles }}
 
       # Show what tauri actually produced so CI logs tell us the real
-      # paths when the upload glob misses (happens across platforms —
-      # e.g. nsis ends up in a different subdir than msi, `.app` is a
-      # directory, etc.).
+      # paths when the upload glob misses. Note: this is a Cargo
+      # workspace, so `target/` sits at the repo root, NOT under
+      # `src-tauri/` — easy mistake to make after Tauri scaffolding
+      # docs assume a single-crate project.
       - name: List bundle output
         shell: bash
         run: |
           set -eu
-          echo "== src-tauri/target/release/bundle =="
-          ls -R src-tauri/target/release/bundle || true
+          echo "== target/release/bundle =="
+          ls -R target/release/bundle || true
 
       - name: Upload bundle
         uses: actions/upload-artifact@v4
@@ -153,7 +154,7 @@ jobs:
           # because a subfolder renamed between tauri versions. The
           # `release` job filters by extension when uploading to the
           # GitHub Release.
-          path: src-tauri/target/release/bundle/**
+          path: target/release/bundle/**
           if-no-files-found: error
 
   # Publishes a GitHub Release when a `v*` tag is pushed. Downloads the
