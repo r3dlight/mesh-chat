@@ -1,4 +1,14 @@
-# mesh-chat
+<p align="center">
+  <img src="ui/public/logo.svg" alt="mesh-chat logo" width="140" />
+</p>
+
+<h1 align="center">mesh-chat</h1>
+
+<p align="center">
+  <em>A chat client for LoRa mesh networks — Rust, TUI + desktop GUI.</em>
+</p>
+
+---
 
 > ⚠ **Tested only on Linux (Ubuntu 24.04) with a Heltec WiFi LoRa 32 V4
 > running Meshtastic firmware 2.7.15.** Windows and macOS builds are
