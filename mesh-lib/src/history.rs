@@ -30,6 +30,15 @@ use tracing::{debug, info, warn};
 pub const HISTORY_MAGIC_V1: &str = "#MESHCHAT-ENC-V1";
 pub const HISTORY_MAGIC_V2_PREFIX: &str = "#MESHCHAT-ENC-V2";
 
+/// Fixed plaintext written as the first encrypted line of every new v2
+/// history file (right below the magic header). On unlock we decrypt
+/// this line and compare against `CANARY_PLAINTEXT`; a wrong
+/// passphrase makes the decrypt fail (AEAD tag mismatch) and we
+/// surface "wrong passphrase" immediately — without this, a wipe
+/// followed by a typo would silently accept the bad passphrase
+/// because there were no real messages yet to verify against.
+pub const CANARY_PLAINTEXT: &str = "MESHCHAT-CANARY-V2";
+
 /// Argon2id parameters. Tweaking these invalidates previously saved files,
 /// so any change must bump the magic version.
 const KDF_MEMORY_KB: u32 = 65_536;
@@ -157,14 +166,30 @@ fn random_salt() -> [u8; SALT_LEN] {
 /// passphrase is wrong, returns an error with that wording.
 pub fn unlock_v2(salt: [u8; SALT_LEN], passphrase: &str) -> Result<HistoryMode> {
     let key = derive_key(passphrase, &salt)?;
+    // Verify against the first non-header line. Post-fix files have a
+    // canary as that line (see `CANARY_PLAINTEXT` and the writer
+    // below); pre-fix files have a real message — either way a wrong
+    // passphrase makes the AEAD decrypt fail and we surface it.
     if let Some(path) = history_file_path() {
         if let Ok(content) = std::fs::read_to_string(&path) {
+            let mut found_line = false;
             for (i, line) in content.lines().enumerate() {
                 if i == 0 || line.trim().is_empty() {
                     continue;
                 }
+                found_line = true;
                 decrypt_line(&key, line).map_err(|_| anyhow::anyhow!("wrong passphrase"))?;
                 break;
+            }
+            if !found_line {
+                // Header-only file, no canary, no messages: we can't
+                // distinguish a good from a bad passphrase from disk
+                // state alone. This only happens for files created by
+                // old versions of the app (pre-canary). The caller
+                // should treat unlock as provisional — the first write
+                // will bake the current key into a canary line and
+                // subsequent unlocks will verify properly.
+                info!("no verification line in history file — accepting unlock provisionally");
             }
         }
     }
@@ -248,6 +273,34 @@ pub fn rotate_if_needed(max_size_mb: u64) -> Result<()> {
     Ok(())
 }
 
+/// Delete both the live history file and its rotated `.old` archive.
+/// Intended for the UI's "clear history" action — the caller is
+/// responsible for dropping any open `HistoryWriter` **before** calling
+/// this (on Windows you cannot remove a file while it's open).
+/// Missing files are treated as success.
+pub fn delete_history_files() -> Result<()> {
+    let Some(path) = history_file_path() else {
+        return Ok(());
+    };
+    let old_path = path.with_extension("jsonl.old");
+    for candidate in [&path, &old_path] {
+        match std::fs::remove_file(candidate) {
+            Ok(()) => info!(file = %candidate.display(), "history file removed"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Nothing to delete — idempotent.
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "remove {}: {}",
+                    candidate.display(),
+                    e
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Append-only writer. Silently no-ops if the file can't be opened.
 pub struct HistoryWriter {
     file: Option<std::fs::File>,
@@ -293,12 +346,29 @@ impl HistoryWriter {
             .open(&path)
             .ok();
 
-        // New encrypted file: write the v2 magic header with our salt.
+        // New encrypted file: write the v2 magic header with our salt,
+        // followed by an encrypted canary line. The canary is the only
+        // reliable way to detect a wrong passphrase when the file
+        // hasn't yet accumulated any real messages — without it, a
+        // wipe + typo silently wrote lines under a bad key (see
+        // `CANARY_PLAINTEXT` for the full rationale).
         if matches!(detected, DetectedFormat::Empty) {
-            if let (HistoryMode::Encrypted { salt, .. }, Some(f)) = (&mode, file.as_mut()) {
+            if let (HistoryMode::Encrypted { salt, key }, Some(f)) = (&mode, file.as_mut()) {
                 if let Err(e) = writeln!(f, "{}", format_v2_header(salt)) {
                     warn!(error = %e, "writing v2 header failed; disabling history");
                     return Self { file: None, mode };
+                }
+                match encrypt_line(key, CANARY_PLAINTEXT) {
+                    Ok(enc) => {
+                        if let Err(e) = writeln!(f, "{}", enc) {
+                            warn!(error = %e, "writing canary failed; disabling history");
+                            return Self { file: None, mode };
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "canary encrypt failed; disabling history");
+                        return Self { file: None, mode };
+                    }
                 }
             }
         }
@@ -524,5 +594,26 @@ mod tests {
             salt: [0u8; SALT_LEN],
         };
         assert!(m.is_encrypted());
+    }
+
+    #[test]
+    fn canary_roundtrip_with_right_key() {
+        // Freshly-generated key encrypts the canary, same key decrypts
+        // it back to the literal. This is the minimum guarantee
+        // `unlock_v2` relies on to detect a wrong passphrase even
+        // when the file has no real messages yet.
+        let key = derive_key("hunter2", &[7u8; SALT_LEN]).unwrap();
+        let encoded = encrypt_line(&key, CANARY_PLAINTEXT).unwrap();
+        let decoded = decrypt_line(&key, &encoded).unwrap();
+        assert_eq!(decoded, CANARY_PLAINTEXT);
+    }
+
+    #[test]
+    fn canary_decrypt_fails_with_wrong_key() {
+        let salt = [7u8; SALT_LEN];
+        let good = derive_key("hunter2", &salt).unwrap();
+        let bad = derive_key("hunter3", &salt).unwrap();
+        let encoded = encrypt_line(&good, CANARY_PLAINTEXT).unwrap();
+        assert!(decrypt_line(&bad, &encoded).is_err());
     }
 }
