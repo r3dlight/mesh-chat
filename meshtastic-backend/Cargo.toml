@@ -1,0 +1,26 @@
+[package]
+name = "meshtastic-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mesh-core = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+meshtastic = "0.1.8"
+base64 = "0.22"
+prost = "0.14"
+
+[[bin]]
+name = "test_connect"
+path = "src/bin/test_connect.rs"

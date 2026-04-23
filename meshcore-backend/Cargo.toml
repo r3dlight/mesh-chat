@@ -1,0 +1,22 @@
+[package]
+name = "meshcore-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mesh-core = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+futures = "0.3"
+# Keep only the serial feature for now — BLE pulls in btleplug + platform deps
+# (Windows COM, macOS CoreBluetooth) that we don't need yet. TCP is similarly
+# out of scope until someone asks for it.
+meshcore-rs = { version = "0.1.10", default-features = false, features = ["serial"] }

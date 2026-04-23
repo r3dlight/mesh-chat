@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability set for the mesh-chat main window: basic app ops + global event listen/emit (needed by our mesh-event channel from Rust to the Vue UI).",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:app:default",
+    "core:window:default",
+    "core:webview:default",
+    "notification:default"
+  ]
+}

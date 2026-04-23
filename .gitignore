@@ -1,0 +1,29 @@
+# Rust
+target/
+**/target/
+Cargo.lock.bak
+*.rs.bk
+
+# Node / Vite
+node_modules/
+ui/dist/
+
+# Tauri build artifacts
+src-tauri/gen/
+src-tauri/target/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Local secrets / runtime files
+*.log
+**/*.log
+/tmp/mesh-chat-tui.log
+
+# Personal session notes (not committed — see WORKLOG.md)
+WORKLOG.md
+
+# Local IDE / tooling state
+.claude/

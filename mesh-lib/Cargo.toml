@@ -1,0 +1,24 @@
+[package]
+name = "mesh-lib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared client-side utilities (history, …) for mesh-chat frontends"
+
+[lints]
+workspace = true
+
+[dependencies]
+mesh-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+base64 = "0.22"
+hex = "0.4"
+rand = "0.10"
+dirs = "5"
+serialport = "4"
+toml = "0.8"

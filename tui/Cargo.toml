@@ -1,0 +1,25 @@
+[package]
+name = "mesh-chat-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mesh-core = { workspace = true }
+mesh-lib = { workspace = true }
+meshcore-backend = { workspace = true }
+meshtastic-backend = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = "0.2"
+chrono = { workspace = true }
+ratatui = "0.28"
+crossterm = "0.28"
+rand = "0.10"
+serde_json = { workspace = true }
+rpassword = "7"

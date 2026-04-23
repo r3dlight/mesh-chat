@@ -1,0 +1,63 @@
+[workspace]
+resolver = "2"
+members = [
+    "mesh-core",
+    "mesh-lib",
+    "meshcore-backend",
+    "meshtastic-backend",
+    "tui",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+# Workspace-wide lints. Follows the ANSSI Rust secure-coding guide:
+# https://anssi-fr.github.io/rust-guide/
+# - `unsafe_code` forbidden everywhere.
+# - `unwrap_used` / `expect_used` warned so panics in production paths
+#   get flagged in CI (tests add `#[allow(...)]` where needed).
+# - Integer-safety lints warned so obvious overflow/truncation bugs surface.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# ANSSI-inspired subset; the stricter arithmetic/indexing lints are not
+# enabled workspace-wide because UI code (ratatui state arithmetic, scroll
+# offsets, sidebar indexing) would drown in false positives. They can be
+# turned on per-crate for pieces with stricter requirements.
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+# Release profile: overflow checks on (ANSSI recommendation), LTO for
+# tighter binaries.
+[profile.release]
+overflow-checks = true
+lto = "thin"
+codegen-units = 1
+
+[workspace.dependencies]
+mesh-core = { path = "mesh-core" }
+mesh-lib = { path = "mesh-lib" }
+meshcore-backend = { path = "meshcore-backend" }
+meshtastic-backend = { path = "meshtastic-backend" }
+
+tokio = { version = "1", default-features = false, features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+] }
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }

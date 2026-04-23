@@ -1,0 +1,163 @@
+:root {
+  /* Surfaces — a bit more contrast between layers so they're actually
+     readable on most displays. */
+  --bg-0: #070a10;
+  --bg-1: #0e1320;
+  --bg-2: #151b2a;
+  --bg-3: #1e2639;
+  --bg-4: #2a3349;
+  --line: #2f3a54;
+  --line-soft: #232b3d;
+
+  /* Text — bumped up so it stops feeling washed-out. */
+  --fg: #eef2fa;
+  --fg-muted: #a5adc4;
+  --fg-dim: #6f788f;
+
+  /* Accents — warm yellow (brand), cool blue (info), green (own / safe),
+     red (open / danger). Slightly punchier than before. */
+  --accent: #ffd23a;
+  --accent-soft: rgba(255, 210, 58, 0.16);
+  --info: #6ab6ff;
+  --info-soft: rgba(106, 182, 255, 0.14);
+  --success: #4ae08a;
+  --success-soft: rgba(74, 224, 138, 0.15);
+  --danger: #ff6565;
+  --danger-soft: rgba(255, 101, 101, 0.16);
+
+  /* Shape */
+  --radius: 10px;
+  --radius-sm: 6px;
+  --radius-lg: 14px;
+
+  /* Shadows */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 10px 30px rgba(0, 0, 0, 0.45);
+
+  /* Fonts */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue",
+    system-ui, sans-serif;
+  --font-mono:
+    ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  background:
+    radial-gradient(
+      1100px 700px at 85% -10%,
+      rgba(255, 210, 58, 0.05),
+      transparent 60%
+    ),
+    radial-gradient(
+      900px 600px at -10% 110%,
+      rgba(106, 182, 255, 0.05),
+      transparent 55%
+    ),
+    var(--bg-0);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button,
+input[type="text"],
+input[type="password"],
+input[type="number"],
+select {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0.55rem 0.8rem;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+button {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+button:hover:not(:disabled),
+input[type="text"]:focus,
+input[type="password"]:focus,
+input[type="number"]:focus,
+select:focus {
+  border-color: var(--accent);
+  outline: none;
+  background: var(--bg-3);
+  box-shadow: 0 0 0 2px rgba(255, 210, 58, 0.18);
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #111;
+  border-color: transparent;
+}
+.btn-primary:hover:not(:disabled) {
+  background: #ffde63;
+  border-color: transparent;
+  box-shadow: 0 0 0 2px rgba(255, 210, 58, 0.3);
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  padding: 0.05rem 0.3rem;
+  background: var(--bg-3);
+  border-radius: 4px;
+  color: var(--info);
+}
+
+/* Custom scrollbar for the dark theme */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--bg-4);
+  border-radius: 10px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: #3c4868;
+  background-clip: content-box;
+}
+
+/* Selection */
+::selection {
+  background: rgba(255, 210, 58, 0.3);
+  color: var(--fg);
+}
