@@ -1067,6 +1067,21 @@ async fn handle_packet(
     }
 }
 
+/// Evict `pending_acks` entries older than `ACK_PENDING_TTL` relative to
+/// `now`. Extracted from `handle_routing` so the test can inject a
+/// deterministic `now` instead of relying on `Instant::now().checked_sub`
+/// which can fail on freshly-booted Windows CI runners (the monotonic
+/// clock simply doesn't reach far enough into the past).
+fn prune_stale_acks(pending_acks: &mut HashMap<u32, (u64, Instant)>, now: Instant) {
+    pending_acks.retain(|_, (_, sent_at)| {
+        now.checked_duration_since(*sent_at)
+            .map(|age| age < ACK_PENDING_TTL)
+            // `now` is before `sent_at` → not stale (defensive; shouldn't
+            // happen in practice because we always pass `Instant::now()`).
+            .unwrap_or(true)
+    });
+}
+
 /// Decode a `RoutingApp` packet and, if its `request_id` matches one of
 /// our outstanding sends, emit a `SendAck` event so the UI can upgrade
 /// the message status. `Routing.variant = ErrorReason(0)` (NONE) is the
@@ -1079,8 +1094,7 @@ async fn handle_routing(
 ) {
     // Drop entries we've been waiting on for too long — keeps memory
     // bounded even if the radio never echoes some acks.
-    let now = Instant::now();
-    pending_acks.retain(|_, (_, sent_at)| now.duration_since(*sent_at) < ACK_PENDING_TTL);
+    prune_stale_acks(pending_acks, Instant::now());
 
     let request_id = data.request_id;
     if request_id == 0 {
@@ -1413,24 +1427,26 @@ mod tests {
         assert!(pending.contains_key(&0));
     }
 
-    #[tokio::test]
-    async fn stale_pending_acks_are_evicted() {
-        let (tx, _rx) = mpsc::channel::<MeshEvent>(4);
-        let mut pending: HashMap<u32, (u64, Instant)> = HashMap::new();
-        let long_ago = Instant::now()
-            .checked_sub(ACK_PENDING_TTL + Duration::from_secs(1))
-            .unwrap();
-        pending.insert(111, (1, long_ago));
-        pending.insert(222, (2, Instant::now()));
+    #[test]
+    fn prune_stale_acks_keeps_fresh_drops_stale() {
+        // We build time going FORWARD from `base`. `checked_add` is always
+        // safe; `checked_sub(Instant::now(), 301s)` is not — on a
+        // freshly-booted Windows CI runner the monotonic clock hasn't
+        // advanced far enough and returns `None`.
+        let base = Instant::now();
+        let now = base
+            .checked_add(ACK_PENDING_TTL + Duration::from_secs(2))
+            .expect("future Instant representable");
+        // `fresh_at` is within the TTL window of `now` → must be kept.
+        let fresh_at = now
+            .checked_sub(Duration::from_secs(1))
+            .expect("1s before a known-future Instant is always valid");
 
-        // Any Routing packet triggers the GC pass. request_id 999 is not in
-        // the map, so no ack is emitted — only the stale pruning matters.
-        handle_routing(
-            &routing_data(999, protobufs::routing::Error::None),
-            &tx,
-            &mut pending,
-        )
-        .await;
+        let mut pending: HashMap<u32, (u64, Instant)> = HashMap::new();
+        pending.insert(111, (1, base)); // age = TTL + 2s → stale
+        pending.insert(222, (2, fresh_at)); // age = 1s → kept
+
+        prune_stale_acks(&mut pending, now);
 
         assert!(!pending.contains_key(&111), "stale entry should be dropped");
         assert!(pending.contains_key(&222), "fresh entry should remain");
