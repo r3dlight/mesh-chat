@@ -31,6 +31,12 @@ pub struct Aliases {
     /// of the sidebar regardless of recency.
     #[serde(default)]
     pub favorites: Vec<String>,
+    /// Last backend the user picked in the UI Connect card. Overrides
+    /// the `[general] network` value in `config.toml` when set so the
+    /// user doesn't have to hand-edit TOML just because they reflashed
+    /// their radio. `"meshtastic"` / `"meshcore"` (lowercase).
+    #[serde(default)]
+    pub preferred_network: Option<String>,
 }
 
 impl Aliases {
