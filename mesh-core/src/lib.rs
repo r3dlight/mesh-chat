@@ -233,6 +233,14 @@ pub enum MeshEvent {
         local_id: u64,
         ok: bool,
         error: Option<String>,
+        /// Radio-level packet id of the dispatched message, when the
+        /// backend can surface it (Meshtastic captures it via
+        /// `PacketRouter::handle_mesh_packet`; Meshcore's companion
+        /// protocol has no equivalent so it stays `None`). The UI uses
+        /// this to match incoming emoji reactions back to the message
+        /// the user just sent.
+        #[serde(default)]
+        packet_id: Option<u32>,
     },
     /// Radio-layer acknowledgement of an earlier send. `delivered = true`
     /// means the firmware received a Routing ACK from the mesh; otherwise
