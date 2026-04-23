@@ -57,16 +57,78 @@ without touching UI code.
 
 **Nodes & direct messages**
 
-- Nodes view: id, long_name, battery, SNR, hops, last-heard (relative).
+- Nodes view: id, long_name, battery, SNR, hops, last-heard (relative),
+  position pin (if known), per-user **alias** and **favorite star**.
 - **Start DM** from nodes list: opens or reuses a thread with that peer
   and switches the current space to it. DMs are end-to-end encrypted
   when both peers have PKC keys (Meshtastic 2.5+).
+- Favorited DMs float to the top of the sidebar. Aliases and favorites
+  are persisted atomically in `$XDG_DATA_HOME/mesh-chat/aliases.json`.
 
-**Radio configuration (read for now — write = Phase F TODO)**
+**Dual-protocol backends**
 
-- LoRa region, modem preset, hop limit, bandwidth, SF, coding rate,
-  tx_power.
-- Node identity (`long_name` / `short_name`) is **writable** from the
+- **Meshtastic** backend via the upstream `meshtastic` crate (protobuf
+  over USB-CDC). Full feature set.
+- **Meshcore** backend via `meshcore-rs` (Ripple companion-radio protocol
+  on serial). The companion protocol has no native reaction or
+  packet-id primitive, so a handful of Meshtastic-specific features
+  (✓✓ delivery ack, emoji reactions) are gated off when on Meshcore —
+  the UI shows an explicit tooltip.
+- Select via `[general] network = "meshtastic" | "meshcore"` in
+  `config.toml`. Defaults to `meshtastic` for backwards compat.
+
+**Per-message actions**
+
+- **Reply** (↩): inline composer bar with the quoted preview. The wire
+  payload is prefixed `> @author: quote\n…` so non-mesh-chat clients
+  still see the reference.
+- **Forward** (↗): pick any other space from a modal; sends the text
+  and switches to the destination.
+- **Emoji reactions** (Meshtastic only): 8 inline emojis under every
+  received bubble, one click to send. Uses the native `emoji=1` proto
+  flag so the Meshtastic mobile apps render them as pills too, not
+  bubbles. Pills on the bubble aggregate reactions by sender.
+- **End-to-end delivery ack** (`✓✓`): captured by matching the radio's
+  Routing packets back to outgoing message ids. Routing failures
+  (`MAX_RETRANSMIT`, `NO_CHANNEL`, …) are surfaced as `✗` with the
+  firmware error code as tooltip.
+
+**Search, positions, telemetry**
+
+- **In-space search** (Ctrl+F): case-insensitive filter on message
+  bodies and reply quotes, live match count.
+- **Position sharing** (📍): broadcasts your GPS via `PortNum::PositionApp`
+  (Meshtastic) or `set_coords` (Meshcore). Received positions render as
+  a pill under the sender's bubbles with an OpenStreetMap link, plus a
+  column in the Nodes modal.
+- **Radio telemetry** (📊): periodic `DeviceMetrics` packets decoded
+  into a panel — battery, voltage, channel utilisation, TX airtime %,
+  uptime per node.
+
+**Desktop notifications**
+
+- Tauri notifications fire on inactive-window DMs and on channel
+  messages that mention your long_name (case-insensitive substring).
+  Opt-in at the OS level on first use.
+
+**Channel sharing**
+
+- Every secondary channel has a **Share** button that generates a
+  `meshtastic.org/e/#<base64>` URL (standard Meshtastic channel-set
+  encoding) plus a QR code SVG. Any Meshtastic app imports it by
+  scanning.
+
+**Radio configuration**
+
+- **Read**: LoRa region, modem preset, hop limit, bandwidth, SF, coding
+  rate, TX power, device role.
+- **Write** (Tauri, `⚙ radio` button / `r` shortcut): region, modem
+  preset, device role, hop limit (0–7), TX enabled, TX power (0–30 dBm).
+  The backend overlays only user-edited fields on top of the last
+  config snapshot from the radio, so untouched fields (e.g.
+  `sx126x_rx_boosted_gain`) keep their current value. Two-step confirm
+  with a diff preview before the write hits the wire.
+- Node identity (`long_name` / `short_name`) is writable from the
   `👤` toolbar button in Tauri or `e` in the Settings modal of the TUI.
 
 **Device discovery**
@@ -92,23 +154,103 @@ without touching UI code.
 - `overflow-checks = true` in release builds.
 - Argon2id `m=65536, t=3, p=4` + 16-byte random salt per file.
 
-## Requirements
+## Installation
 
-**TUI (minimal)**
+> Windows and macOS builds are produced by CI but have **not been
+> verified on hardware**. Reports welcome.
+
+### From a release (prebuilt)
+
+Grab the asset matching your platform from the
+[latest release](../../releases/latest).
+
+**Linux — AppImage** (portable, no install):
+
+```bash
+chmod +x mesh-chat-desktop_*.AppImage
+./mesh-chat-desktop_*.AppImage
+```
+
+**Linux — `.deb`** (Ubuntu / Debian):
+
+```bash
+sudo dpkg -i mesh-chat-desktop_*.deb
+sudo apt --fix-broken install     # pulls missing runtime deps if needed
+```
+
+On Linux, add yourself to `dialout` once so the app can open the serial
+port without `sudo`:
+
+```bash
+sudo usermod -a -G dialout $USER
+# log out / log in (or reboot) for the group to take effect
+```
+
+**Windows — `.msi` installer** or **`.exe` portable**:
+
+- Double-click the `.msi` and follow the installer; the app appears in
+  the Start menu.
+- The `.exe` is a standalone binary — run it from any folder.
+- Windows Defender may prompt on first run: the bundles are not
+  code-signed yet (TODO).
+
+**macOS — `.dmg`**:
+
+1. Double-click the `.dmg` to mount it.
+2. Drag `mesh-chat.app` into `/Applications`.
+3. First launch: right-click the app → **Open** (bypasses Gatekeeper
+   since bundles aren't notarised yet).
+
+### From source
+
+Clone + build. Requirements below are per-OS.
+
+**Linux (Ubuntu / Debian)**:
 
 ```bash
 sudo apt install build-essential pkg-config libssl-dev libudev-dev
-sudo usermod -a -G dialout $USER    # log out/in afterwards
-```
-
-**Desktop (Tauri)** — adds WebKitGTK + friends:
-
-```bash
+# GUI only — adds WebKitGTK + friends:
 sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
                  librsvg2-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+sudo usermod -a -G dialout $USER    # log out/in afterwards
+
+git clone <repo-url> mesh-chat && cd mesh-chat
+cargo run -p mesh-chat-tui                  # TUI
+cd ui && npm install && cd ../src-tauri
+cargo tauri dev                             # GUI (hot reload)
 ```
 
-Plus [Rust](https://rustup.rs), and for desktop: Node.js ≥ 22.
+**Windows 11** (PowerShell as Administrator for the toolchain
+install — not for the app itself):
+
+```powershell
+# 1. Rust toolchain (https://rustup.rs — installs MSVC prerequisites automatically).
+# 2. Node.js LTS from https://nodejs.org (≥ 22).
+# 3. WebView2 runtime (bundled with Win 11; separate installer on Win 10).
+# 4. Optional: winget install --id Microsoft.VisualStudio.2022.BuildTools
+
+git clone <repo-url> mesh-chat
+cd mesh-chat
+cargo run -p mesh-chat-tui                  # TUI
+cd ui && npm install && cd ..\src-tauri
+cargo tauri dev                             # GUI
+```
+
+**macOS** (11+ with Xcode Command Line Tools):
+
+```bash
+xcode-select --install                      # one-time
+brew install node                           # or install from nodejs.org
+# Rust toolchain: https://rustup.rs
+
+git clone <repo-url> mesh-chat && cd mesh-chat
+cargo run -p mesh-chat-tui                  # TUI
+cd ui && npm install && cd ../src-tauri
+cargo tauri dev                             # GUI
+```
+
+Plus [Rust](https://rustup.rs) on every platform, and Node.js ≥ 22 for
+the desktop build.
 
 ## Running
 
@@ -288,16 +430,23 @@ serial reads.
 ```bash
 cargo test --workspace
 cargo clippy --workspace --all-targets
-cargo fmt --all --check
 ```
 
 GitHub Actions (`.github/workflows/ci.yml`):
 
-- **lint**: fmt + clippy on Linux
+- **lint**: clippy on Linux (rustfmt check disabled — it fights with
+  hand-wrapped multi-line expressions in test helpers).
 - **test**: build + `cargo test` on ubuntu / windows / macos (Tauri
-  crate excluded on non-Linux)
+  crate excluded on non-Linux).
 - **bundle**: produces `.AppImage + .deb` on Linux, `.msi + .exe` on
-  Windows, `.app + .dmg` on macOS — uploaded as artifacts
+  Windows, `.app + .dmg` on macOS — uploaded as workflow artifacts.
+- **release** (tag pushes only): downloads bundles from the matrix
+  and publishes them as assets on a GitHub Release. Pre-1.0 tags
+  (`v0.*`) are marked as prereleases. Cut a release by pushing a tag:
+  ```bash
+  git tag v0.1.0
+  git push origin v0.1.0
+  ```
 
 ## Gotchas learned the hard way
 
@@ -319,30 +468,17 @@ GitHub Actions (`.github/workflows/ci.yml`):
 
 ## TODO
 
-### Phase F — radio config writes
-
-- [ ] Region / modem preset / role from Settings modal
-- [ ] Guardrails (region-legal tx_power, illegal region warnings)
-
-### Phase G — multi-backend
-
-- [ ] `meshcore-backend` crate
-- [ ] Unified view tagging (the `network` tag is already carried)
-
-### Phase H — desktop polish
-
 - [ ] Real app icons (current set is a generated placeholder)
-- [ ] Keyboard shortcuts in the Vue frontend
-- [ ] Release pipeline with tagged GitHub Releases
-
-### Other
-
-- [ ] End-to-end mesh delivery ack (current `Sent` only reflects local
-      radio acceptance — needs Routing packet matching)
-- [ ] Custom hex / base64 PSK input with masked double-entry
-- [ ] Channel QR code / URL export (`meshtastic.org/e/#...`)
-- [ ] Desktop notifications on mention / new DM
-- [ ] History rotation / size cap
+- [ ] Verify Windows and macOS builds on actual hardware (CI currently
+      only proves they compile and link)
+- [ ] TUI parity with the GUI for newer features: emoji reactions,
+      received positions, aliases / favorites, forward, telemetry panel
+- [ ] Inline map view for received positions (currently just an
+      OpenStreetMap link via the 📍 pill)
+- [ ] Surface more Meshtastic telemetry variants in the stats panel
+      (environment, power, health) — only DeviceMetrics is decoded today
+- [ ] Investigate Meshcore v2 once it adds sender attribution on
+      channel messages (currently rendered as synthetic `chan{N}`)
 
 ## License
 
