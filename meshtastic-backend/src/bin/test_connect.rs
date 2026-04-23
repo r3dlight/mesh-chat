@@ -88,13 +88,15 @@ async fn main() -> anyhow::Result<()> {
                 local_id,
                 ok,
                 error,
+                packet_id,
             } => {
                 println!(
-                    "[SEND {}] id={} ok={} err={:?}",
+                    "[SEND {}] id={} ok={} err={:?} packet={:?}",
                     network.as_str(),
                     local_id,
                     ok,
-                    error
+                    error,
+                    packet_id
                 );
             }
             MeshEvent::SendAck {

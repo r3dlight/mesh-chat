@@ -327,6 +327,7 @@ async fn send_text(
                     local_id,
                     ok: false,
                     error: Some(err.clone()),
+                    packet_id: None,
                 },
             )
             .await;
@@ -349,6 +350,7 @@ async fn send_text(
                         local_id,
                         ok: false,
                         error: Some(err.clone()),
+                        packet_id: None,
                     },
                 )
                 .await;
@@ -367,11 +369,14 @@ async fn send_text(
         Ok(()) => {
             // The upstream crate called `router.handle_mesh_packet` with the
             // freshly-built MeshPacket (because send_text sets
-            // echo_response: true). Pick up the generated packet id so we
-            // can correlate the eventual Routing ACK.
-            if let Some(pkt_id) = router.last_sent_packet_id.take() {
-                pending_acks.insert(pkt_id, (local_id, Instant::now()));
-                debug!(channel, local_id, packet_id = pkt_id, "awaiting routing ack");
+            // echo_response: true). Pick up the generated packet id — we
+            // use it both to correlate the eventual Routing ACK and to
+            // populate `ChatMessage.packetId` in the UI so incoming
+            // emoji reactions to this message can be matched back.
+            let pkt_id = router.last_sent_packet_id.take();
+            if let Some(id) = pkt_id {
+                pending_acks.insert(id, (local_id, Instant::now()));
+                debug!(channel, local_id, packet_id = id, "awaiting routing ack");
             } else {
                 warn!(
                     local_id,
@@ -386,6 +391,7 @@ async fn send_text(
                     local_id,
                     ok: true,
                     error: None,
+                    packet_id: pkt_id,
                 },
             )
             .await;
@@ -400,6 +406,7 @@ async fn send_text(
                     local_id,
                     ok: false,
                     error: Some(err.clone()),
+                    packet_id: None,
                 },
             )
             .await;
@@ -440,6 +447,7 @@ async fn send_reaction(
                     local_id,
                     ok: false,
                     error: Some(err.clone()),
+                    packet_id: None,
                 },
             )
             .await;
@@ -461,6 +469,7 @@ async fn send_reaction(
                         local_id,
                         ok: false,
                         error: Some(err.clone()),
+                        packet_id: None,
                     },
                 )
                 .await;
@@ -491,9 +500,10 @@ async fn send_reaction(
 
     match result {
         Ok(()) => {
-            if let Some(pkt_id) = router.last_sent_packet_id.take() {
-                pending_acks.insert(pkt_id, (local_id, Instant::now()));
-                debug!(channel, local_id, packet_id = pkt_id, "reaction awaiting routing ack");
+            let pkt_id = router.last_sent_packet_id.take();
+            if let Some(id) = pkt_id {
+                pending_acks.insert(id, (local_id, Instant::now()));
+                debug!(channel, local_id, packet_id = id, "reaction awaiting routing ack");
             }
             info!(channel, local_id, "reaction sent");
             emit(
@@ -503,6 +513,7 @@ async fn send_reaction(
                     local_id,
                     ok: true,
                     error: None,
+                    packet_id: pkt_id,
                 },
             )
             .await;
@@ -517,6 +528,7 @@ async fn send_reaction(
                     local_id,
                     ok: false,
                     error: Some(err.clone()),
+                    packet_id: None,
                 },
             )
             .await;
@@ -558,6 +570,7 @@ async fn send_position(
                 local_id,
                 ok: false,
                 error: Some(err.clone()),
+                packet_id: None,
             },
         )
         .await;
@@ -587,6 +600,7 @@ async fn send_position(
                 local_id,
                 ok: false,
                 error: Some(err.clone()),
+                packet_id: None,
             },
         )
         .await;
@@ -605,6 +619,7 @@ async fn send_position(
                     local_id,
                     ok: false,
                     error: Some(err.clone()),
+                    packet_id: None,
                 },
             )
             .await;
@@ -643,6 +658,7 @@ async fn send_position(
                     local_id,
                     ok: true,
                     error: None,
+                    packet_id: None,
                 },
             )
             .await;
@@ -657,6 +673,7 @@ async fn send_position(
                     local_id,
                     ok: false,
                     error: Some(err.clone()),
+                    packet_id: None,
                 },
             )
             .await;
@@ -684,12 +701,16 @@ async fn set_channel(
         ChannelRole::Secondary => protobufs::channel::Role::Secondary,
     };
 
+    // Keep a copy of what we're writing so we can emit a synthetic
+    // ChannelInfo event after the write succeeds — the firmware is
+    // spotty about echoing back an updated ChannelInfo on its own, and
+    // the webview was left showing a stale list until the next restart.
     let settings = if matches!(role, ChannelRole::Disabled) {
         None
     } else {
         Some(protobufs::ChannelSettings {
-            psk,
-            name,
+            psk: psk.clone(),
+            name: name.clone(),
             uplink_enabled: true,
             downlink_enabled: true,
             ..Default::default()
@@ -704,7 +725,34 @@ async fn set_channel(
 
     info!(index, role = role.as_str(), "writing channel");
     match api.update_channel_config(router, channel).await {
-        Ok(()) => info!(index, "channel write sent"),
+        Ok(()) => {
+            info!(index, "channel write sent");
+            // Echo the write back to our own UI immediately. If the
+            // firmware eventually emits its own ChannelInfo, it'll just
+            // overwrite this synthetic copy with authoritative data.
+            let echo_info = if matches!(role, ChannelRole::Disabled) {
+                ChannelInfo {
+                    network: Network::Meshtastic,
+                    index,
+                    role: ChannelRole::Disabled,
+                    name: String::new(),
+                    psk: Vec::new(),
+                    uplink_enabled: false,
+                    downlink_enabled: false,
+                }
+            } else {
+                ChannelInfo {
+                    network: Network::Meshtastic,
+                    index,
+                    role,
+                    name,
+                    psk,
+                    uplink_enabled: true,
+                    downlink_enabled: true,
+                }
+            };
+            emit(event_tx, MeshEvent::ChannelInfo(echo_info)).await;
+        }
         Err(e) => {
             warn!(index, error = %e, "channel write failed");
             send_err(event_tx, format!("set channel {}: {}", index, e)).await;
