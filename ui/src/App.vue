@@ -15,6 +15,42 @@ const logoUrl = "/logo.svg";
 
 const ports = ref([]);
 const selectedPort = ref("");
+// Sidebar width, driven by a mouse-drag splitter between the sidebar
+// and the chat panel. Bounded client-side to stay usable on both
+// extremes.
+const sidebarWidth = ref(260);
+const SIDEBAR_MIN = 180;
+const SIDEBAR_MAX = 560;
+function startSidebarResize(ev) {
+  ev.preventDefault();
+  const startX = ev.clientX;
+  const startW = sidebarWidth.value;
+  const onMove = (e) => {
+    const dx = e.clientX - startX;
+    sidebarWidth.value = Math.max(
+      SIDEBAR_MIN,
+      Math.min(SIDEBAR_MAX, startW + dx),
+    );
+  };
+  const onUp = () => {
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+    document.body.style.userSelect = "";
+    document.body.style.cursor = "";
+  };
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+  // Disable text selection and force a col-resize cursor globally
+  // while dragging so the pointer doesn't flicker when it passes over
+  // other elements.
+  document.body.style.userSelect = "none";
+  document.body.style.cursor = "col-resize";
+}
+// Which backend the user picked in the Connect card. Defaults to
+// whatever they last saved (via `get_aliases().preferred_network`) so
+// next launch comes up on the same firmware without having to touch
+// config.toml. `connect_device` persists this automatically.
+const selectedBackend = ref("meshtastic");
 const input = ref("");
 const status = ref("disconnected");
 const myId = ref(null);
@@ -85,22 +121,45 @@ const editPsk = ref("random16");
 const channelBusy = ref(false);
 const channelError = ref(null);
 
-const PSK_PRESETS = [
-  { value: "random16", label: "random16 (AES-128 custom)" },
-  { value: "random32", label: "random32 (AES-256 custom)" },
-  { value: "custom", label: "custom — paste hex or base64 below" },
-  { value: "default", label: "default (LongFast — public)" },
-  { value: "default2", label: "default2 — public" },
-  { value: "default3", label: "default3 — public" },
-  { value: "default4", label: "default4 — public" },
-  { value: "default5", label: "default5 — public" },
-  { value: "default6", label: "default6 — public" },
-  { value: "default7", label: "default7 — public" },
-  { value: "default8", label: "default8 — public" },
-  { value: "default9", label: "default9 — public" },
-  { value: "default10", label: "default10 — public" },
-  { value: "none", label: "none (no encryption)" },
+// Each preset tags the PSK byte-length so we can filter options per
+// backend. Meshcore only accepts exactly 16-byte channel secrets; every
+// other size (0, 1, 32) is Meshtastic-specific and the Meshcore
+// firmware rejects / crashes on them.
+const ALL_PSK_PRESETS = [
+  { value: "random16", label: "random16 (AES-128 custom)", pskLen: 16 },
+  { value: "random32", label: "random32 (AES-256 custom)", pskLen: 32 },
+  { value: "custom", label: "custom — paste hex or base64 below", pskLen: null },
+  { value: "default", label: "default (LongFast — public)", pskLen: 1 },
+  { value: "default2", label: "default2 — public", pskLen: 1 },
+  { value: "default3", label: "default3 — public", pskLen: 1 },
+  { value: "default4", label: "default4 — public", pskLen: 1 },
+  { value: "default5", label: "default5 — public", pskLen: 1 },
+  { value: "default6", label: "default6 — public", pskLen: 1 },
+  { value: "default7", label: "default7 — public", pskLen: 1 },
+  { value: "default8", label: "default8 — public", pskLen: 1 },
+  { value: "default9", label: "default9 — public", pskLen: 1 },
+  { value: "default10", label: "default10 — public", pskLen: 1 },
+  { value: "none", label: "none (no encryption)", pskLen: 0 },
 ];
+
+// Presets presented to the user, filtered + annotated for the active
+// backend. On Meshcore the disallowed ones are kept for discoverability
+// but marked `disabled: true` with a suffix on the label so they stand
+// out as incompatible instead of just vanishing.
+const PSK_PRESETS = computed(() => {
+  return ALL_PSK_PRESETS.map((p) => {
+    if (currentNetwork.value !== "meshcore") return { ...p, disabled: false };
+    // `custom` with a 16-byte input is allowed on Meshcore; we can't
+    // know the size ahead of time so keep it enabled and validate on
+    // submit.
+    const meshcoreOk = p.pskLen === 16 || p.pskLen === null;
+    return {
+      ...p,
+      disabled: !meshcoreOk,
+      label: meshcoreOk ? p.label : `${p.label} — Meshtastic only`,
+    };
+  });
+});
 
 // Extra state for the custom PSK double-entry flow.
 const customPsk1 = ref("");
@@ -108,9 +167,12 @@ const customPsk2 = ref("");
 
 // Channel share modal state.
 const shareOpen = ref(false);
-const shareData = ref({ url: "", qr_svg: "" });
+const shareData = ref({ url: "", qr_svg: "", name: "", psk_hex: "" });
 const shareError = ref(null);
 const shareBusy = ref(false);
+// Raw-PSK is masked by default (sensitive). Toggled via a "reveal"
+// button inside the share modal.
+const sharePskRevealed = ref(false);
 
 // Per-user overrides: alias map + favorites set. Loaded once from Tauri
 // on mount; every mutation goes back through set_alias / set_favorite so
@@ -159,12 +221,45 @@ const positionForm = ref({ latitude: null, longitude: null });
 const positionError = ref(null);
 const positionBusy = ref(false);
 
+// Clear-history confirm modal state. Destructive, so the user must
+// click "Yes, delete everything" once the red banner is showing.
+const clearHistoryOpen = ref(false);
+const clearHistoryBusy = ref(false);
+const clearHistoryError = ref(null);
+
 // In-space search. Ctrl+F toggles the bar; Esc clears and closes.
 // Filter runs inside `filteredMessages` so the match count is just the
 // length of the result array.
 const searchVisible = ref(false);
 const searchQuery = ref("");
 const searchInputEl = ref(null);
+
+function openClearHistoryModal() {
+  clearHistoryError.value = null;
+  clearHistoryOpen.value = true;
+}
+
+async function confirmClearHistory() {
+  clearHistoryError.value = null;
+  clearHistoryBusy.value = true;
+  try {
+    await invoke("clear_history");
+    // Wipe in-memory state so the UI empties immediately. We keep
+    // `channels`, `nodes`, `aliases`, `favorites`, `positions`, and
+    // `telemetry` — none of that is the user's message content, and
+    // re-fetching from the radio is slow.
+    messages.value = [];
+    dmThreads.value = {};
+    dmUnread.value = {};
+    historyInfo.value.restored = 0;
+    historyInfo.value.errors = 0;
+    clearHistoryOpen.value = false;
+  } catch (e) {
+    clearHistoryError.value = e?.message || String(e);
+  } finally {
+    clearHistoryBusy.value = false;
+  }
+}
 
 function openPositionModal() {
   positionError.value = null;
@@ -289,9 +384,7 @@ const currentLabel = computed(() => {
 const isPrivateChannel = computed(() => {
   // DMs are end-to-end encrypted via firmware PKC — always private in the UI.
   if (isDmSpace.value) return true;
-  const c = currentChannelInfo.value;
-  if (!c) return false;
-  return c.psk?.length === 16 || c.psk?.length === 32;
+  return channelPrivate(currentChannelInfo.value, currentSpace.value.idx);
 });
 
 // Ordered list of spaces for the sidebar: channels (non-disabled) then DM
@@ -350,7 +443,23 @@ function channelName(info, index) {
   return `ch${index}`;
 }
 
-function channelPrivate(info) {
+function channelPrivate(info, index) {
+  if (!info) return false;
+  // Meshcore's channel 0 ships with a well-known 16-byte public key
+  // baked into every firmware build — anyone running Meshcore can
+  // read it. Treat as PUBLIC regardless of PSK length. Same rule
+  // applies to any channel the user literally named "public" since
+  // that convention is how Meshcore's official clients share the
+  // public channel across installs.
+  const networkLower = (info.network || "").toString().toLowerCase();
+  const isMeshcore = networkLower === "meshcore";
+  if (isMeshcore) {
+    if (index === 0) return false;
+    if ((info.name || "").trim().toLowerCase() === "public") return false;
+  }
+  // Meshtastic: 0-byte = no crypto, 1-byte = defaultN shortcut (public
+  // key published in every firmware image). 16/32-byte = user-chosen
+  // AES-128/256 → private.
   return info?.psk?.length === 16 || info?.psk?.length === 32;
 }
 
@@ -454,6 +563,16 @@ async function submitChannelEdit() {
     channelError.value = "name too long (max 11 chars)";
     return;
   }
+  // Meshcore only accepts 16-byte channel secrets. Reject presets that
+  // produce any other size before the command leaves the UI — sending
+  // the radio a bad-size secret can crash Meshcore 1.15 firmware.
+  if (currentNetwork.value === "meshcore") {
+    const preset = ALL_PSK_PRESETS.find((p) => p.value === editPsk.value);
+    if (preset && preset.pskLen !== null && preset.pskLen !== 16) {
+      channelError.value = `Meshcore only accepts 16-byte PSKs (this preset produces ${preset.pskLen} bytes). Use random16 or a 16-byte custom.`;
+      return;
+    }
+  }
   channelBusy.value = true;
   try {
     if (editPsk.value === "custom") {
@@ -486,19 +605,40 @@ async function submitChannelEdit() {
   }
 }
 
+function pskToHex(psk) {
+  if (!psk) return "";
+  return Array.from(psk)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 async function shareChannel(index) {
   const c = channels.value[index];
   if (!c) return;
   shareError.value = null;
   shareBusy.value = true;
+  sharePskRevealed.value = false;
+  const displayName = c.name || (c.role === "Primary" ? "default" : `ch${index}`);
+  const pskHex = pskToHex(c.psk);
   try {
-    const res = await invoke("channel_share_fields", {
-      name: c.name || (c.role === "Primary" ? "default" : `ch${index}`),
-      psk: Array.from(c.psk || []),
-      uplinkEnabled: c.uplink_enabled ?? true,
-      downlinkEnabled: c.downlink_enabled ?? true,
-    });
-    shareData.value = res;
+    // The URL+QR path is Meshtastic-specific (meshtastic.org/e/# encoding).
+    // Meshcore channels fall back to raw-PSK copy only; the `url` / `qr_svg`
+    // fields just stay empty and the modal hides that section.
+    let res = { url: "", qr_svg: "" };
+    if (currentNetwork.value === "meshtastic") {
+      res = await invoke("channel_share_fields", {
+        name: displayName,
+        psk: Array.from(c.psk || []),
+        uplinkEnabled: c.uplink_enabled ?? true,
+        downlinkEnabled: c.downlink_enabled ?? true,
+      });
+    }
+    shareData.value = {
+      url: res.url,
+      qr_svg: res.qr_svg,
+      name: displayName,
+      psk_hex: pskHex,
+    };
     shareOpen.value = true;
   } catch (e) {
     shareError.value = e?.message || String(e);
@@ -507,14 +647,26 @@ async function shareChannel(index) {
   }
 }
 
-async function copyShareUrl() {
+async function copyToClipboard(text, label) {
   try {
-    await navigator.clipboard.writeText(shareData.value.url);
-    shareError.value = "copied ✓";
+    await navigator.clipboard.writeText(text);
+    shareError.value = `${label} copied ✓`;
     setTimeout(() => (shareError.value = null), 1500);
   } catch (e) {
     shareError.value = `copy failed: ${e}`;
   }
+}
+
+async function copyShareUrl() {
+  await copyToClipboard(shareData.value.url, "URL");
+}
+
+async function copySharePsk() {
+  await copyToClipboard(shareData.value.psk_hex, "PSK");
+}
+
+async function copyShareName() {
+  await copyToClipboard(shareData.value.name, "Name");
 }
 
 async function deleteChannel(index) {
@@ -535,8 +687,8 @@ function pskPreview(psk) {
   return `${psk.length} bytes`;
 }
 
-function channelPrivacyTag(info) {
-  return channelPrivate(info) ? "PRIVATE" : "PUBLIC";
+function channelPrivacyTag(info, index) {
+  return channelPrivate(info, index) ? "PRIVATE" : "PUBLIC";
 }
 
 // Nodes modal: sorted list with "Start DM" action.
@@ -791,6 +943,12 @@ async function refreshAliases() {
     const favMap = {};
     for (const id of snap.favorites || []) favMap[id] = true;
     favorites.value = favMap;
+    // Pre-select the Connect-card backend toggle from the saved
+    // preference. Falls back to whatever was already in the ref when
+    // the snapshot has no value yet (first launch).
+    if (snap.preferred_network) {
+      selectedBackend.value = snap.preferred_network;
+    }
   } catch (e) {
     console.warn("get_aliases failed:", e);
   }
@@ -919,12 +1077,32 @@ async function connect() {
   if (!selectedPort.value) return;
   status.value = `connecting to ${selectedPort.value}…`;
   try {
-    await invoke("connect_device", { port: selectedPort.value });
+    // Pass the UI-selected backend explicitly. Tauri persists it, so
+    // next launch comes up already tuned to the same firmware.
+    await invoke("connect_device", {
+      port: selectedPort.value,
+      network: selectedBackend.value,
+    });
     connected.value = true;
     status.value = "connected";
   } catch (e) {
     status.value = `error: ${e}`;
   }
+}
+
+async function disconnect() {
+  status.value = "disconnecting…";
+  try {
+    await invoke("shutdown");
+  } catch (e) {
+    // Surface but keep going — the UI still needs to reset even if the
+    // backend didn't acknowledge cleanly.
+    console.warn("shutdown command failed:", e);
+  }
+  connected.value = false;
+  myId.value = null;
+  currentNetwork.value = "none";
+  status.value = "disconnected";
 }
 
 async function refreshHistoryState() {
@@ -1083,7 +1261,13 @@ function handleMeshEvent(evt) {
     const r = evt.SendResult;
     const update = (arr) => {
       const m = arr.find((x) => x.localId === r.local_id);
-      if (m) m.sendStatus = r.ok ? "Sent" : { Failed: r.error };
+      if (!m) return;
+      m.sendStatus = r.ok ? "Sent" : { Failed: r.error };
+      // Remember the radio-level packet id for outgoing messages. This
+      // is what lets `applyReaction` match when the other party reacts
+      // to something we sent — otherwise the reaction would look for
+      // `packetId = null` and silently drop.
+      if (r.packet_id != null) m.packetId = r.packet_id;
     };
     update(messages.value);
     for (const peer of Object.keys(dmThreads.value)) {
@@ -1416,8 +1600,8 @@ onBeforeUnmount(() => {
                 </span>
               </td>
               <td>
-                <span :class="channelPrivate(channels[i - 1]) ? 'tag-success-sm' : 'tag-danger-sm'">
-                  {{ channelPrivacyTag(channels[i - 1]) }}
+                <span :class="channelPrivate(channels[i - 1], i - 1) ? 'tag-success-sm' : 'tag-danger-sm'">
+                  {{ channelPrivacyTag(channels[i - 1], i - 1) }}
                 </span>
                 <span class="psk-preview">{{ pskPreview(channels[i - 1]?.psk) }}</span>
               </td>
@@ -1457,6 +1641,13 @@ onBeforeUnmount(() => {
           @submit.prevent="submitChannelEdit"
         >
           <h4>Edit channel #{{ editingChannel }}</h4>
+          <div v-if="currentNetwork === 'meshcore'" class="meshcore-hint">
+            ⚠ Meshcore firmware accepts only a <strong>16-byte</strong>
+            channel secret. Any other size (0, 1, 32) is rejected — and
+            on Meshcore 1.15 the radio may crash the screen. Use
+            <code>random16</code> or paste a 16-byte <code>custom</code>
+            PSK (32 hex chars or equivalent base64).
+          </div>
           <label class="field">
             <span>Name</span>
             <input v-model="editName" maxlength="11" :disabled="channelBusy" />
@@ -1469,6 +1660,7 @@ onBeforeUnmount(() => {
                 v-for="opt in PSK_PRESETS"
                 :key="opt.value"
                 :value="opt.value"
+                :disabled="opt.disabled"
               >
                 {{ opt.label }}
               </option>
@@ -1526,22 +1718,77 @@ onBeforeUnmount(() => {
             ✕
           </button>
         </div>
-        <p class="panel-hint">
+        <p class="panel-hint" v-if="shareData.url">
           Scan the QR code on another Meshtastic device, or share the
           link. Importing it adds this channel (same name + PSK) to the
           recipient's radio.
         </p>
-        <div class="qr-wrap" v-html="shareData.qr_svg" />
-        <label class="field">
+        <p class="panel-hint" v-else>
+          Meshcore has no interop URL format. Copy the name and the raw
+          PSK below, then enter them on the other device with the same
+          <code>random16</code> / 16-byte custom option.
+        </p>
+
+        <div class="qr-wrap" v-if="shareData.qr_svg" v-html="shareData.qr_svg" />
+        <label class="field" v-if="shareData.url">
           <span>URL</span>
           <input type="text" :value="shareData.url" readonly />
         </label>
+
+        <!-- Works on both backends -->
+        <label class="field">
+          <span>Name</span>
+          <input type="text" :value="shareData.name" readonly />
+          <button
+            type="button"
+            class="field-action"
+            title="Copy name"
+            @click="copyShareName"
+          >
+            📋
+          </button>
+        </label>
+        <label class="field">
+          <span>PSK (hex)</span>
+          <input
+            :type="sharePskRevealed ? 'text' : 'password'"
+            :value="shareData.psk_hex"
+            readonly
+            class="mono-input"
+          />
+          <button
+            type="button"
+            class="field-action"
+            :title="sharePskRevealed ? 'Hide' : 'Reveal'"
+            @click="sharePskRevealed = !sharePskRevealed"
+          >
+            {{ sharePskRevealed ? "🙈" : "👁" }}
+          </button>
+          <button
+            type="button"
+            class="field-action"
+            title="Copy PSK"
+            @click="copySharePsk"
+          >
+            📋
+          </button>
+        </label>
+        <p class="panel-hint" style="margin-top: -0.2rem">
+          PSK is masked by default. The clipboard copy is unmasked — make
+          sure no shoulder-surfer is looking before pasting elsewhere.
+        </p>
+
         <div v-if="shareError" class="unlock-error">
           {{ shareError.includes("copied") ? "✓" : "⚠" }} {{ shareError }}
         </div>
         <div class="panel-actions">
           <button type="button" @click="shareOpen = false">Close</button>
-          <button type="button" class="btn-primary" @click="copyShareUrl">
+          <button
+            v-if="shareData.url"
+            type="button"
+            class="btn-primary"
+            @click="copyShareUrl"
+          >
             Copy URL
           </button>
         </div>
@@ -1649,6 +1896,52 @@ onBeforeUnmount(() => {
       </form>
     </div>
 
+    <!-- Clear-history confirm modal -->
+    <div
+      v-if="clearHistoryOpen"
+      class="panel-overlay"
+      @click.self="clearHistoryOpen = false"
+    >
+      <div class="panel-card">
+        <div class="panel-head">
+          <h3>🗑 Wipe chat history</h3>
+          <button
+            type="button"
+            class="panel-x"
+            @click="clearHistoryOpen = false"
+          >
+            ✕
+          </button>
+        </div>
+        <div class="radio-warn">
+          ⚠ This permanently deletes every channel and DM message ever
+          saved to disk, plus the rotated <code>.old</code> archive. The
+          action cannot be undone.
+        </div>
+        <p class="panel-hint">
+          Nodes, channels, aliases, favorites and stored positions are
+          kept. Only the chat log is removed. The encryption passphrase
+          stays unchanged.
+        </p>
+        <div v-if="clearHistoryError" class="unlock-error">
+          ⚠ {{ clearHistoryError }}
+        </div>
+        <div class="panel-actions">
+          <button type="button" @click="clearHistoryOpen = false">
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="btn-primary btn-danger"
+            :disabled="clearHistoryBusy"
+            @click="confirmClearHistory"
+          >
+            {{ clearHistoryBusy ? "Deleting…" : "Yes, delete everything" }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Share-position modal -->
     <div
       v-if="positionModalOpen"
@@ -1741,7 +2034,7 @@ onBeforeUnmount(() => {
             @click="forwardTo(s)"
           >
             <template v-if="s.kind === 'channel'">
-              <span class="priv-dot" :class="channelPrivate(s.info) ? 'dot-private' : 'dot-public'" />
+              <span class="priv-dot" :class="channelPrivate(s.info, s.idx) ? 'dot-private' : 'dot-public'" />
               <span>{{ channelName(s.info, s.idx) }}</span>
               <span class="forward-meta">#{{ s.idx }}</span>
             </template>
@@ -1774,10 +2067,20 @@ onBeforeUnmount(() => {
             ✕
           </button>
         </div>
-        <p class="panel-hint">
-          Latest device metrics broadcast by each node (Meshtastic
-          `TelemetryApp` packets). Meshcore nodes do not expose this
-          over the companion protocol, so they won't appear here.
+        <p class="panel-hint" v-if="currentNetwork === 'meshtastic'">
+          Latest device metrics broadcast by each node via Meshtastic
+          <code>TelemetryApp</code> packets (default cadence: one per
+          ~30 min).
+        </p>
+        <p class="panel-hint" v-else-if="currentNetwork === 'meshcore'">
+          Meshcore's companion protocol does not stream per-peer
+          telemetry. Only <strong>your own node's</strong> battery shows
+          up here — refreshed every minute by polling
+          <code>get_bat</code>. Channel utilization and TX airtime stay
+          unknown.
+        </p>
+        <p class="panel-hint" v-else>
+          Waiting for the backend to report telemetry data.
         </p>
         <table class="nodes-table">
           <thead>
@@ -1810,8 +2113,15 @@ onBeforeUnmount(() => {
             </tr>
             <tr v-if="sortedTelemetryNodes.length === 0">
               <td colspan="7" class="empty-row">
-                No telemetry packets received yet. Meshtastic nodes
-                broadcast device metrics every ~30min by default.
+                <template v-if="currentNetwork === 'meshtastic'">
+                  No telemetry packets received yet. Meshtastic nodes
+                  broadcast device metrics every ~30 min by default.
+                </template>
+                <template v-else-if="currentNetwork === 'meshcore'">
+                  No battery snapshot yet — give the poll loop a minute
+                  to hit the radio after connect.
+                </template>
+                <template v-else>No data yet.</template>
               </td>
             </tr>
           </tbody>
@@ -1977,6 +2287,32 @@ onBeforeUnmount(() => {
           }}
         </span>
         <span
+          v-if="currentNetwork !== 'none'"
+          class="chip"
+          :class="
+            currentNetwork === 'meshtastic'
+              ? 'chip-net-meshtastic'
+              : currentNetwork === 'meshcore'
+                ? 'chip-net-meshcore'
+                : 'chip-muted'
+          "
+          :title="
+            currentNetwork === 'meshtastic'
+              ? 'Meshtastic backend (protobuf over serial)'
+              : currentNetwork === 'meshcore'
+                ? 'Meshcore backend (companion radio protocol)'
+                : 'unknown backend'
+          "
+        >
+          {{
+            currentNetwork === "meshtastic"
+              ? "📡 meshtastic"
+              : currentNetwork === "meshcore"
+                ? "🌐 meshcore"
+                : currentNetwork
+          }}
+        </span>
+        <span
           v-if="connected"
           class="chip"
           :class="isPrivateChannel ? 'chip-success' : 'chip-danger'"
@@ -1993,12 +2329,59 @@ onBeforeUnmount(() => {
     <!-- Body -->
     <main class="body">
       <!-- Left rail -->
-      <aside class="sidebar">
+      <aside
+        class="sidebar"
+        :style="{ width: sidebarWidth + 'px', flex: '0 0 ' + sidebarWidth + 'px' }"
+      >
+        <!-- Connection status card at the top. Exactly one of these
+             three states is active at a time; the tools below are
+             shown in addition whenever `historyState` is loaded. -->
+        <div v-if="connected" class="connect-card connected-card">
+          <h3>Connected</h3>
+          <div class="connected-line">
+            <span class="connected-label">backend</span>
+            <span class="connected-value">
+              {{
+                currentNetwork === "meshtastic"
+                  ? "📡 Meshtastic"
+                  : currentNetwork === "meshcore"
+                    ? "🌐 Meshcore"
+                    : currentNetwork
+              }}
+            </span>
+          </div>
+          <div class="connected-line" v-if="myId">
+            <span class="connected-label">node</span>
+            <span class="connected-value mono">{{ myId }}</span>
+          </div>
+          <button class="full btn-danger" @click="disconnect">
+            ⏏ Disconnect
+          </button>
+        </div>
+
         <div
-          v-if="!connected && historyState && historyState.unlocked"
+          v-else-if="historyState && historyState.unlocked"
           class="connect-card"
         >
           <h3>Connect</h3>
+          <div class="network-toggle" role="group" aria-label="Backend">
+            <button
+              type="button"
+              class="network-option"
+              :class="{ active: selectedBackend === 'meshtastic' }"
+              @click="selectedBackend = 'meshtastic'"
+            >
+              📡 Meshtastic
+            </button>
+            <button
+              type="button"
+              class="network-option"
+              :class="{ active: selectedBackend === 'meshcore' }"
+              @click="selectedBackend = 'meshcore'"
+            >
+              🌐 Meshcore
+            </button>
+          </div>
           <select v-model="selectedPort" class="full">
             <option v-for="p in ports" :key="p" :value="p">{{ p }}</option>
             <option v-if="ports.length === 0" disabled>(no ports detected)</option>
@@ -2032,7 +2415,10 @@ onBeforeUnmount(() => {
           <button class="full" @click="refreshHistoryState">Retry</button>
         </div>
 
-        <template v-else>
+        <!-- Tools (tiles + spaces list) — only shown once we're
+             actually connected. Hidden when disconnected to avoid
+             teasing the user with stale / non-actionable UI. -->
+        <template v-if="connected">
           <div class="panel-toolbar">
             <button
               class="tb-btn"
@@ -2040,7 +2426,8 @@ onBeforeUnmount(() => {
               title="Edit node name"
               :disabled="!connected"
             >
-              👤 me
+              <span class="tb-icon">👤</span>
+              <span class="tb-label">me</span>
             </button>
             <button
               class="tb-btn"
@@ -2048,7 +2435,8 @@ onBeforeUnmount(() => {
               title="Manage channels"
               :disabled="!connected"
             >
-              # chans
+              <span class="tb-icon">#</span>
+              <span class="tb-label">chans</span>
             </button>
             <button
               class="tb-btn"
@@ -2056,7 +2444,8 @@ onBeforeUnmount(() => {
               title="Nodes on the mesh"
               :disabled="!connected"
             >
-              ⧉ nodes
+              <span class="tb-icon">⧉</span>
+              <span class="tb-label">nodes</span>
             </button>
             <button
               class="tb-btn"
@@ -2064,7 +2453,8 @@ onBeforeUnmount(() => {
               title="Share your position"
               :disabled="!connected"
             >
-              📍 pos
+              <span class="tb-icon">📍</span>
+              <span class="tb-label">pos</span>
             </button>
             <button
               class="tb-btn"
@@ -2072,7 +2462,8 @@ onBeforeUnmount(() => {
               title="Radio telemetry (battery, channel util, airtime)"
               :disabled="!connected"
             >
-              📊 stats
+              <span class="tb-icon">📊</span>
+              <span class="tb-label">stats</span>
             </button>
             <button
               class="tb-btn tb-btn-danger"
@@ -2080,7 +2471,16 @@ onBeforeUnmount(() => {
               title="Radio config (region, preset, role) — advanced"
               :disabled="!connected"
             >
-              ⚙ radio
+              <span class="tb-icon">⚙</span>
+              <span class="tb-label">radio</span>
+            </button>
+            <button
+              class="tb-btn tb-btn-danger"
+              @click="openClearHistoryModal"
+              title="Erase all stored chat history — destructive"
+            >
+              <span class="tb-icon">🗑</span>
+              <span class="tb-label">wipe</span>
             </button>
           </div>
 
@@ -2097,7 +2497,7 @@ onBeforeUnmount(() => {
               <template v-if="s.kind === 'channel'">
                 <span
                   class="priv-dot"
-                  :class="channelPrivate(s.info) ? 'dot-private' : 'dot-public'"
+                  :class="channelPrivate(s.info, s.idx) ? 'dot-private' : 'dot-public'"
                 />
                 <span class="chan-name">{{ channelName(s.info, s.idx) }}</span>
                 <span class="chan-idx">#{{ s.idx }}</span>
@@ -2134,6 +2534,17 @@ onBeforeUnmount(() => {
           </span>
         </div>
       </aside>
+
+      <!-- Drag handle between sidebar and chat — grabbable anywhere
+        along the vertical strip (wider hit area than the visible
+        indicator for easier targeting). -->
+      <div
+        class="splitter"
+        title="Drag to resize"
+        @mousedown="startSidebarResize"
+      >
+        <div class="splitter-bar" />
+      </div>
 
       <!-- Main chat -->
       <section class="chat">
@@ -2443,6 +2854,20 @@ onBeforeUnmount(() => {
   color: var(--fg-muted);
   border-color: var(--line-soft);
 }
+/* Backend identity chips — blue for Meshtastic (matches their brand),
+ * warm orange for Meshcore. Distinct from the green/red privacy chip so
+ * users never confuse "am I on the right protocol?" with "is this
+ * channel private?". */
+.chip-net-meshtastic {
+  background: rgba(88, 166, 255, 0.12);
+  color: var(--info);
+  border-color: rgba(88, 166, 255, 0.35);
+}
+.chip-net-meshcore {
+  background: rgba(255, 165, 60, 0.14);
+  color: #ffb34a;
+  border-color: rgba(255, 165, 60, 0.4);
+}
 .chip .pulse {
   width: 7px;
   height: 7px;
@@ -2468,12 +2893,14 @@ onBeforeUnmount(() => {
 
 /* ─── Body layout ─────────────────────────────────────────────────────── */
 .body {
-  display: grid;
-  grid-template-columns: 260px 1fr;
+  display: flex;
   min-height: 0;
 }
 
 /* ─── Sidebar ─────────────────────────────────────────────────────────── */
+/* Width is driven by the `:style` binding (Vue's `sidebarWidth` ref),
+ * updated by the `.splitter` drag handle to the right. Hard bounds are
+ * enforced in JS (SIDEBAR_MIN / SIDEBAR_MAX) so the CSS stays simple. */
 .sidebar {
   background: var(--bg-1);
   border-right: 1px solid var(--line-soft);
@@ -2482,7 +2909,43 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 1rem;
   min-height: 0;
-  overflow-y: auto;
+  overflow: auto;
+}
+
+/* 6-px drag strip between sidebar and chat. The visible indicator
+ * inside is only 2px wide so the split doesn't feel heavy, but the
+ * hit area stays comfortable. */
+.splitter {
+  flex: 0 0 6px;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  user-select: none;
+  /* Cover the 1-px sidebar border with our own so there's no double
+   * line once we take over the separation. */
+  margin-left: -1px;
+  border-left: 1px solid transparent;
+  transition: background-color 120ms ease;
+}
+.splitter:hover,
+.splitter:active {
+  background: rgba(255, 210, 58, 0.12);
+}
+.splitter-bar {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 2px;
+  height: 48px;
+  background: var(--line);
+  border-radius: 2px;
+  transition: background-color 120ms ease, height 120ms ease;
+}
+.splitter:hover .splitter-bar,
+.splitter:active .splitter-bar {
+  background: var(--accent);
+  height: 72px;
 }
 .connect-card {
   background: var(--bg-2);
@@ -2579,6 +3042,11 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-rows: auto 1fr auto;
   min-height: 0;
+  /* Chat column takes whatever's left next to the resizable sidebar.
+   * `min-width: 0` is critical so long message bubbles don't push the
+   * flex child above 100% of the body width. */
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .chat-header {
   display: flex;
@@ -2810,36 +3278,180 @@ onBeforeUnmount(() => {
 }
 
 /* Panel toolbar */
+/* Icon-above-label tiles in a responsive grid. `auto-fill` + a
+ * sensible min width means the grid naturally reflows from one row of
+ * 7 (wide sidebar) down to two rows of 4+3 (default 260px) or three
+ * rows of 3+3+1 on very narrow layouts, without ever cramping the
+ * icons. Labels stay one word each so text never wraps inside a tile. */
 .panel-toolbar {
-  display: flex;
-  gap: 0.35rem;
-  margin-bottom: 0.5rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(62px, 1fr));
+  gap: 4px;
+  margin-bottom: 0.75rem;
 }
 .tb-btn {
-  flex: 1;
-  padding: 0.6rem 0.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 0.5rem 0.25rem;
   background: var(--bg-2);
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-sm);
   color: var(--fg-muted);
-  font-size: 0.92rem;
-  font-weight: 600;
-  font-family: var(--font-mono);
-  letter-spacing: 0.03em;
   cursor: pointer;
-  transition: all 120ms ease;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    transform 80ms ease;
+  /* Tiles are near-square so they sit evenly. */
+  min-height: 52px;
 }
 .tb-btn:hover:not(:disabled) {
   background: var(--bg-3);
   border-color: var(--accent);
   color: var(--fg);
 }
+.tb-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+.tb-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.tb-icon {
+  font-size: 1.1rem;
+  line-height: 1.15;
+}
+.tb-label {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+/* Destructive tiles (radio config write, history wipe) get a subtle
+ * red edge so risky actions visually stand apart from the
+ * informational ones. Hover brings the red forward. */
 .tb-btn-danger {
+  border-color: rgba(255, 101, 101, 0.25);
+}
+.tb-btn-danger .tb-label,
+.tb-btn-danger .tb-icon {
   color: var(--danger);
 }
 .tb-btn-danger:hover:not(:disabled) {
+  background: var(--danger-soft);
   border-color: var(--danger);
+}
+.tb-btn-danger:hover:not(:disabled) .tb-label,
+.tb-btn-danger:hover:not(:disabled) .tb-icon {
   color: var(--danger);
+}
+
+/* Connected card — replaces the Connect card once the link is live.
+ * Compact summary (backend + node id) then a red Disconnect button. */
+.connected-card h3 {
+  color: var(--success);
+}
+.connected-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 0.82rem;
+  gap: 0.5rem;
+}
+.connected-label {
+  color: var(--fg-dim);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.connected-value {
+  color: var(--fg);
+  font-weight: 600;
+}
+.connected-value.mono {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+
+/* Connect-card backend toggle — two-button segmented control. Lets
+ * users flip between Meshtastic and Meshcore without editing the TOML
+ * config, which was a common trap right after reflashing a radio. */
+.network-toggle {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg-3);
+  border-radius: var(--radius-sm);
+}
+.network-option {
+  flex: 1;
+  padding: 0.4rem 0.55rem;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--fg-muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 120ms ease;
+  font-family: var(--font-mono);
+}
+.network-option:hover:not(.active) {
+  color: var(--fg);
+}
+.network-option.active {
+  background: var(--bg-1);
+  color: var(--fg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+/* Meshcore-specific warning shown in the channel editor. Same look as
+ * the radio-write warning so the "this might brick your radio" pattern
+ * is visually consistent across the app. */
+.meshcore-hint {
+  padding: 0.6rem 0.85rem;
+  margin-bottom: 0.3rem;
+  border: 1px solid rgba(255, 165, 60, 0.45);
+  background: rgba(255, 165, 60, 0.1);
+  color: #ffb34a;
+  border-radius: var(--radius-sm);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+.meshcore-hint code {
+  background: rgba(0, 0, 0, 0.25);
+  padding: 0 0.3rem;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+
+/* Small icon button slotted at the end of a `.field` row (copy, reveal, …) */
+.field-action {
+  background: transparent;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  color: var(--fg-muted);
+  font-size: 0.95rem;
+  padding: 0.35rem 0.55rem;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+.field-action:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: transparent;
+}
+/* Monospace for hex secrets so they align predictably. */
+.mono-input {
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
 }
 
 /* Radio config modal */
