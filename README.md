@@ -375,8 +375,27 @@ set a passphrase (twice). Subsequent launches ask you to unlock.
 #MESHCHAT-ENC-V2 argon2id m=65536 t=3 p=4 salt=<base64-16>
 ```
 
-followed by one `base64(nonce_12 || ciphertext || tag_16)` per message.
+second line is a **canary** — the fixed plaintext `MESHCHAT-CANARY-V2`
+encrypted with the derived key. Subsequent lines are one
+`base64(nonce_12 || ciphertext || tag_16)` per chat message.
 Key = Argon2id(passphrase, salt) → 32 bytes. Held in memory only.
+
+The canary exists so that `unlock` can detect a wrong passphrase even
+on a freshly-created history that has no real messages yet. Without it,
+a wipe followed by a typo would silently accept the bad passphrase
+(nothing to decrypt to verify against) and write subsequent messages
+under a key the user could no longer reproduce — effectively bricking
+the store. Files created before the canary shipped are still readable:
+`unlock` falls back to verifying against the first real encrypted
+message, same as before.
+
+If a file somehow ends up with mismatched salt / key (e.g. from older
+app versions or manual tampering), the only recovery is to move the
+file aside and start fresh:
+
+```bash
+mv ~/.local/share/mesh-chat/history.jsonl{,.corrupt}
+```
 
 **Frontends indicate state** with a chip at the top:
 
