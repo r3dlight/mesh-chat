@@ -134,18 +134,27 @@ jobs:
         working-directory: src-tauri
         run: cargo tauri build --bundles ${{ matrix.bundles }}
 
+      # Show what tauri actually produced so CI logs tell us the real
+      # paths when the upload glob misses (happens across platforms —
+      # e.g. nsis ends up in a different subdir than msi, `.app` is a
+      # directory, etc.).
+      - name: List bundle output
+        shell: bash
+        run: |
+          set -eu
+          echo "== src-tauri/target/release/bundle =="
+          ls -R src-tauri/target/release/bundle || true
+
       - name: Upload bundle
         uses: actions/upload-artifact@v4
         with:
           name: mesh-chat-${{ matrix.target }}
-          path: |
-            src-tauri/target/release/bundle/**/*.AppImage
-            src-tauri/target/release/bundle/**/*.deb
-            src-tauri/target/release/bundle/**/*.msi
-            src-tauri/target/release/bundle/**/*.exe
-            src-tauri/target/release/bundle/**/*.dmg
-            src-tauri/target/release/bundle/**/*.app
-          if-no-files-found: warn
+          # Grab the whole `bundle/` tree so we don't miss a file just
+          # because a subfolder renamed between tauri versions. The
+          # `release` job filters by extension when uploading to the
+          # GitHub Release.
+          path: src-tauri/target/release/bundle/**
+          if-no-files-found: error
 
   # Publishes a GitHub Release when a `v*` tag is pushed. Downloads the
   # bundles produced by the matrix above and attaches them as release
@@ -160,14 +169,38 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare assets dir
+        run: mkdir -p release-assets
       - name: Download bundles
         uses: actions/download-artifact@v4
         with:
           path: release-assets
           pattern: mesh-chat-*
           merge-multiple: true
-      - name: List release assets
-        run: ls -lah release-assets
+      - name: List downloaded assets
+        shell: bash
+        run: |
+          set -eu
+          ls -lahR release-assets || echo "(release-assets is empty)"
+      - name: Collect release files
+        id: collect
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p release-flat
+          # Only the end-user bundles end up on the GitHub Release page —
+          # not the intermediary `.rpm` / unpacked `.app` directories that
+          # `upload-artifact` captured for diagnostics. We use `|| true`
+          # on each `find` so a missing extension on a given platform
+          # doesn't fail the step.
+          find release-assets -type f \( \
+              -iname '*.AppImage' -o \
+              -iname '*.deb'      -o \
+              -iname '*.msi'      -o \
+              -iname '*.exe'      -o \
+              -iname '*.dmg' \
+            \) -exec cp -v {} release-flat/ \; || true
+          ls -lah release-flat
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -176,9 +209,8 @@ jobs:
           # Mark pre-1.0 tags (v0.*) as prereleases so they don't overshadow
           # any future stable release on the Releases page.
           prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
-          files: |
-            release-assets/*.AppImage
-            release-assets/*.deb
-            release-assets/*.msi
-            release-assets/*.exe
-            release-assets/*.dmg
+          # Don't fail the release if a given platform's bundle is missing —
+          # some may fail intermittently and we'd rather ship a partial
+          # release than nothing at all.
+          fail_on_unmatched_files: false
+          files: release-flat/*
