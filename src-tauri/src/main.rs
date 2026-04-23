@@ -18,8 +18,8 @@ use std::sync::Arc;
 use mesh_core::{ChannelRole, ChatMessage, MeshBackend, MeshCommand, MeshEvent, Network};
 use mesh_lib::config::{load_config, NetworkChoice};
 use mesh_lib::history::{
-    detect_history_format, history_file_path, init_new_v2, load_history, rotate_if_needed,
-    unlock_v2, DetectedFormat, HistoryMode, HistoryWriter, LoadReport,
+    delete_history_files, detect_history_format, history_file_path, init_new_v2, load_history,
+    rotate_if_needed, unlock_v2, DetectedFormat, HistoryMode, HistoryWriter, LoadReport,
 };
 use mesh_lib::serial::available_ports;
 use meshcore_backend::MeshcoreBackend;
@@ -206,8 +206,9 @@ async fn connect_device(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
     port: String,
+    network: Option<String>,
 ) -> Result<(), String> {
-    info!(%port, "connect_device");
+    info!(%port, network = ?network, "connect_device");
 
     // If encryption is enabled but not yet unlocked, the frontend must
     // call unlock_history first.
@@ -233,8 +234,42 @@ async fn connect_device(
     let (start_result_tx, start_result_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
     let port_for_thread = port.clone();
-    let network_choice = load_config().general.network;
-    info!(network = ?network_choice, "backend selected from config");
+    // Explicit UI pick wins over config.toml; if missing, use whatever
+    // the user last saved in preferences; if still missing, fall back
+    // to the config file; if still missing, default to Meshtastic.
+    let network_choice = match network.as_deref() {
+        Some("meshtastic") => NetworkChoice::Meshtastic,
+        Some("meshcore") => NetworkChoice::Meshcore,
+        Some(other) => {
+            return Err(format!(
+                "unknown network {}: expected \"meshtastic\" or \"meshcore\"",
+                other
+            ));
+        }
+        None => match state.aliases.lock().await.preferred_network.as_deref() {
+            Some("meshtastic") => NetworkChoice::Meshtastic,
+            Some("meshcore") => NetworkChoice::Meshcore,
+            _ => load_config().general.network,
+        },
+    };
+    // Persist the pick so next launch defaults to the same backend
+    // without the user having to touch `config.toml`.
+    let persisted = match network_choice {
+        NetworkChoice::Meshtastic => "meshtastic",
+        NetworkChoice::Meshcore => "meshcore",
+    };
+    {
+        let mut guard = state.aliases.lock().await;
+        if guard.preferred_network.as_deref() != Some(persisted) {
+            guard.preferred_network = Some(persisted.to_string());
+            let snapshot = guard.clone();
+            drop(guard);
+            if let Err(e) = mesh_lib::aliases::save(&snapshot) {
+                warn!(error = %e, "failed to persist preferred_network");
+            }
+        }
+    }
+    info!(network = ?network_choice, "backend selected");
     std::thread::Builder::new()
         .name("mesh-backend".into())
         .spawn(move || {
@@ -757,6 +792,30 @@ async fn send_reaction(
     Ok(local_id)
 }
 
+/// Wipe all persisted chat history. Requires a prior UI confirm dialog —
+/// the destructive action is irreversible. Closes and drops the current
+/// `HistoryWriter` before unlinking the file (Windows refuses to delete
+/// an open file), then re-opens a fresh writer in the same mode so new
+/// messages resume being persisted immediately.
+#[tauri::command]
+async fn clear_history(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    // Drop the existing writer first so the file handle is released.
+    let mode = state
+        .history_mode
+        .lock()
+        .await
+        .clone()
+        .ok_or("history mode not initialized")?;
+    *state.history.lock().await = None;
+
+    delete_history_files().map_err(|e| e.to_string())?;
+
+    // Re-create a fresh writer so subsequent messages keep being recorded.
+    *state.history.lock().await = Some(HistoryWriter::open(mode));
+    info!("history cleared on user request");
+    Ok(())
+}
+
 /// Share the user's current position. Broadcasts on channel 0 via
 /// PortNum::PositionApp (Meshtastic) or persists to the radio's advert
 /// (Meshcore). Coordinates must be valid WGS84.
@@ -785,11 +844,14 @@ async fn send_position(
     Ok(local_id)
 }
 
-/// Snapshot of user overrides for the webview: alias map + favorite set.
+/// Snapshot of user overrides for the webview: alias map + favorite
+/// set + preferred backend (so the UI's Connect card pre-selects the
+/// last backend the user picked without reading `config.toml`).
 #[derive(serde::Serialize)]
 struct AliasSnapshot {
     aliases: std::collections::HashMap<String, String>,
     favorites: Vec<String>,
+    preferred_network: Option<String>,
 }
 
 #[tauri::command]
@@ -798,6 +860,7 @@ async fn get_aliases(state: State<'_, Arc<AppState>>) -> Result<AliasSnapshot, S
     Ok(AliasSnapshot {
         aliases: a.aliases.clone(),
         favorites: a.favorites.clone(),
+        preferred_network: a.preferred_network.clone(),
     })
 }
 
@@ -837,16 +900,26 @@ async fn set_favorite(
     Ok(())
 }
 
+/// User-initiated disconnect — signals the running backend to shut down,
+/// then wipes the Tauri-side bridge state so a subsequent `connect_device`
+/// starts cleanly. Also used as the window-close handler. Idempotent.
 #[tauri::command]
 async fn shutdown(state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    let tx_guard = state.cmd_tx.lock().await;
-    if let Some(tx) = tx_guard.as_ref() {
+    // Take the sender out so subsequent commands that need `cmd_tx` fail
+    // fast ("not connected") instead of racing with an old pending write.
+    let taken = state.cmd_tx.lock().await.take();
+    if let Some(tx) = taken {
         if let Err(e) = tx.send(MeshCommand::Shutdown).await {
             // Channel already closed = backend already exited. Treat as
             // idempotent success rather than an error surfaced to the UI.
             debug!(error = %e, "shutdown: backend command channel already closed");
         }
     }
+    // Clear the cached identity + network so the UI reflects the real
+    // disconnected state (no stale `my_id` chip, etc.).
+    *state.my_id.lock().await = None;
+    *state.current_network.lock().await = None;
+    info!("backend disconnect complete");
     Ok(())
 }
 
@@ -886,6 +959,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             get_network,
             send_reaction,
             send_position,
+            clear_history,
             shutdown,
         ])
         .run(tauri::generate_context!())?;
