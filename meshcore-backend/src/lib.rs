@@ -28,7 +28,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::StreamExt;
 use mesh_core::{
-    BackendHandle, ChatMessage, MeshBackend, MeshCommand, MeshEvent, Network, NodeInfo,
+    BackendHandle, ChannelInfo, ChannelRole, ChatMessage, MeshBackend, MeshCommand, MeshEvent,
+    Network, NodeInfo,
 };
 use meshcore_rs::{events::EventPayload, EventType, MeshCore, MeshCoreEvent};
 use tokio::sync::mpsc;
@@ -111,9 +112,81 @@ impl MeshBackend for MeshcoreBackend {
             Err(e) => warn!(error = %e, "meshcore get_contacts failed; sidebar will fill from adverts"),
         }
 
+        // Re-hydrate the channel list from whatever the firmware has in
+        // flash. Meshtastic pushes all ChannelInfo packets automatically
+        // during `configure(id)` — Meshcore does not, so we poll.
+        // `max_channels` only exists on fw v3+; fall back to 8 (the
+        // Meshtastic-default range) on older firmware.
+        let max_channels = match mc.commands().lock().await.send_device_query().await {
+            Ok(info) => {
+                debug!(fw = info.fw_version_code, max = ?info.max_contacts, "meshcore device info");
+                info.max_channels.unwrap_or(8)
+            }
+            Err(e) => {
+                warn!(error = %e, "meshcore send_device_query failed; assuming 8 channels");
+                8
+            }
+        };
+        for idx in 0..max_channels {
+            match mc.commands().lock().await.get_channel(idx).await {
+                Ok(info) => {
+                    // A freshly-initialized slot often has an empty name
+                    // and an all-zero secret — skip those so the UI
+                    // doesn't show ghost channels. A real, written
+                    // channel has either a name or a non-zero secret.
+                    let has_name = !info.name.trim().is_empty();
+                    let has_secret = info.secret.iter().any(|b| *b != 0);
+                    if !has_name && !has_secret {
+                        continue;
+                    }
+                    emit(
+                        &event_tx,
+                        MeshEvent::ChannelInfo(ChannelInfo {
+                            network: Network::Meshcore,
+                            index: u32::from(idx),
+                            role: ChannelRole::Secondary,
+                            name: info.name,
+                            psk: info.secret.to_vec(),
+                            uplink_enabled: true,
+                            downlink_enabled: true,
+                        }),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    // Index out of range or other firmware-side error —
+                    // stop iterating, anything past here is empty anyway.
+                    debug!(index = idx, error = %e, "meshcore get_channel stopped");
+                    break;
+                }
+            }
+        }
+
         // Hook the firmware's "messages waiting" push notification so missed
         // messages are pulled automatically.
         mc.start_auto_message_fetching().await;
+
+        // Best-effort battery snapshot for the stats panel. The Meshcore
+        // companion protocol has no periodic TelemetryApp equivalent, so
+        // we poll `get_bat` once at startup and then every minute in the
+        // background. Failures are non-fatal — the stats panel just
+        // stays empty for our own node in that case.
+        if let Ok(batt) = mc.commands().lock().await.get_bat().await {
+            emit(
+                &event_tx,
+                MeshEvent::Telemetry {
+                    network: Network::Meshcore,
+                    from: my_id.clone(),
+                    battery_level: Some(u32::from(batt.percentage())),
+                    voltage: Some(batt.voltage()),
+                    channel_utilization: None,
+                    air_util_tx: None,
+                    uptime_seconds: None,
+                    timestamp: chrono::Utc::now().timestamp(),
+                },
+            )
+            .await;
+        }
 
         emit(
             &event_tx,
@@ -124,6 +197,42 @@ impl MeshBackend for MeshcoreBackend {
         .await;
 
         let mc = Arc::new(mc);
+
+        // Periodic battery poll so the stats panel stays current without
+        // relying on push notifications the firmware doesn't emit.
+        let mc_batt = mc.clone();
+        let event_tx_batt = event_tx.clone();
+        let my_id_batt = my_id.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            // Skip the first fire — we've already emitted one snapshot
+            // above as part of the startup sequence.
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let res = mc_batt.commands().lock().await.get_bat().await;
+                if let Ok(batt) = res {
+                    emit(
+                        &event_tx_batt,
+                        MeshEvent::Telemetry {
+                            network: Network::Meshcore,
+                            from: my_id_batt.clone(),
+                            battery_level: Some(u32::from(batt.percentage())),
+                            voltage: Some(batt.voltage()),
+                            channel_utilization: None,
+                            air_util_tx: None,
+                            uptime_seconds: None,
+                            timestamp: chrono::Utc::now().timestamp(),
+                        },
+                    )
+                    .await;
+                }
+                if event_tx_batt.is_closed() {
+                    break;
+                }
+            }
+        });
+
 
         // Event pump: meshcore-rs broadcast stream → our mpsc.
         let mc_stream = mc.clone();
@@ -192,6 +301,7 @@ async fn send_failure(tx: &mpsc::Sender<MeshEvent>, local_id: u64, error: String
             local_id,
             ok: false,
             error: Some(error.clone()),
+            packet_id: None,
         },
     )
     .await;
@@ -425,6 +535,7 @@ async fn handle_cmd(mc: &Arc<MeshCore>, cmd: MeshCommand, event_tx: &mpsc::Sende
                         "reactions require Meshtastic (no native reaction primitive in Meshcore)"
                             .into(),
                     ),
+                    packet_id: None,
                 },
             )
             .await;
@@ -449,6 +560,7 @@ async fn handle_cmd(mc: &Arc<MeshCore>, cmd: MeshCommand, event_tx: &mpsc::Sende
                             "position out of range: lat={} lon={}",
                             latitude, longitude
                         )),
+                        packet_id: None,
                     },
                 )
                 .await;
@@ -464,6 +576,7 @@ async fn handle_cmd(mc: &Arc<MeshCore>, cmd: MeshCommand, event_tx: &mpsc::Sende
                             local_id,
                             ok: true,
                             error: None,
+                            packet_id: None,
                         },
                     )
                     .await;
@@ -477,6 +590,7 @@ async fn handle_cmd(mc: &Arc<MeshCore>, cmd: MeshCommand, event_tx: &mpsc::Sende
                             local_id,
                             ok: false,
                             error: Some(format!("meshcore set_coords: {}", e)),
+                            packet_id: None,
                         },
                     )
                     .await;
@@ -541,6 +655,7 @@ async fn send_text(
                         local_id,
                         ok: true,
                         error: None,
+                        packet_id: None,
                     },
                 )
                 .await;
@@ -583,6 +698,7 @@ async fn send_text(
                     local_id,
                     ok: true,
                     error: None,
+                    packet_id: None,
                 },
             )
             .await;
@@ -638,7 +754,27 @@ async fn set_channel(
         .set_channel(chan_idx, &name, &secret)
         .await
     {
-        Ok(()) => info!(index = chan_idx, "meshcore channel written"),
+        Ok(()) => {
+            info!(index = chan_idx, "meshcore channel written");
+            // Meshcore's companion protocol does not echo back a
+            // ChannelInfo packet after SET_CHANNEL (unlike Meshtastic's
+            // admin reply). We synthesise one from what we just wrote so
+            // the UI's channels modal updates immediately — matches the
+            // user's expectation coming from Meshtastic.
+            emit(
+                event_tx,
+                MeshEvent::ChannelInfo(ChannelInfo {
+                    network: Network::Meshcore,
+                    index: u32::from(chan_idx),
+                    role: ChannelRole::Secondary,
+                    name,
+                    psk: secret.to_vec(),
+                    uplink_enabled: true,
+                    downlink_enabled: true,
+                }),
+            )
+            .await;
+        }
         Err(e) => {
             warn!(index = chan_idx, error = %e, "meshcore set_channel failed");
             send_err(event_tx, format!("meshcore set_channel: {}", e)).await;
