@@ -557,6 +557,12 @@ function channelPrivate(info, index) {
 function displayName(id) {
   // Lookup precedence: user alias → advertised long_name → raw id.
   if (!id) return "?";
+  // Meshcore synthesises sender ids like "chan1" for channel
+  // messages because the companion protocol doesn't carry sender
+  // attribution. Render them as an explicit "anon · ch1" so the
+  // user doesn't mistake it for a real node name.
+  const m = /^chan(\d+)$/.exec(id);
+  if (m) return `anon · ch${m[1]}`;
   const custom = aliases.value[id];
   if (custom) return custom;
   const n = nodes.value[id];
@@ -2943,6 +2949,18 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
+        <!-- Meshcore channel messages don't carry sender attribution
+             in the companion protocol (v2 and v3). Warn once here so
+             the user knows "anon · chN" isn't a bug. -->
+        <div
+          v-if="currentNetwork === 'meshcore' && isChannelSpace"
+          class="channel-anon-note"
+        >
+          ⓘ Meshcore channel messages are anonymous — the companion
+          protocol does not transmit who sent each message. Use DMs
+          if you need sender attribution.
+        </div>
+
         <div v-if="searchVisible" class="search-bar">
           <span class="search-icon">🔍</span>
           <input
@@ -4142,6 +4160,17 @@ onBeforeUnmount(() => {
 .panel-head-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+/* Banner shown at the top of the chat area on a Meshcore channel
+ * space so the user doesn't assume "anon · ch1" is a bug. */
+.channel-anon-note {
+  padding: 0.45rem 1.5rem;
+  background: rgba(255, 165, 60, 0.08);
+  border-bottom: 1px solid rgba(255, 165, 60, 0.25);
+  color: #ffb34a;
+  font-size: 0.8rem;
+  line-height: 1.4;
 }
 
 /* Inline position indicator on received bubbles */
