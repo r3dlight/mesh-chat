@@ -273,6 +273,28 @@ pub enum MeshEvent {
         longitude: f64,
         timestamp: i64,
     },
+    /// Current network (WiFi / Ethernet) config as reported by the
+    /// radio. Sensitive fields (PSK) are never echoed — the firmware
+    /// doesn't return them either, so the UI treats WiFi password as
+    /// a write-only field.
+    NetworkInfo {
+        network: Network,
+        wifi_enabled: bool,
+        wifi_ssid: String,
+        eth_enabled: bool,
+    },
+    /// Current MQTT module config. Password is intentionally not
+    /// carried for the same reason as `NetworkInfo.wifi_psk`.
+    MqttInfo {
+        network: Network,
+        enabled: bool,
+        address: String,
+        username: String,
+        encryption_enabled: bool,
+        tls_enabled: bool,
+        map_reporting_enabled: bool,
+        root: String,
+    },
     /// Device telemetry snapshot: battery, voltage, channel utilization,
     /// airtime TX %, uptime. Broadcast by each node at a configurable
     /// cadence (default 30min on Meshtastic). All metric fields are
@@ -344,6 +366,27 @@ pub enum MeshCommand {
     /// monopolises airtime — callers must guardrail before sending.
     SetDeviceRole {
         role: String,
+    },
+    /// Write WiFi credentials. Empty `wifi_psk` is treated as an open
+    /// network by the firmware. Switching `wifi_enabled = true` also
+    /// disables Bluetooth on most ESP32 builds (shared radio chain).
+    SetNetworkConfig {
+        wifi_enabled: bool,
+        wifi_ssid: String,
+        wifi_psk: String,
+    },
+    /// Write MQTT module config. Setting `map_reporting_enabled = true`
+    /// with `enabled = true` plus WiFi up is what gets the node on
+    /// meshmap.net / meshtastic.org/map.
+    SetMqttConfig {
+        enabled: bool,
+        address: String,
+        username: String,
+        password: String,
+        encryption_enabled: bool,
+        tls_enabled: bool,
+        map_reporting_enabled: bool,
+        root: String,
     },
     /// Send an emoji reaction to a previously-received packet. Only
     /// Meshtastic supports this natively (`Data.emoji=1 + Data.reply_id`);
