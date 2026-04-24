@@ -1397,7 +1397,25 @@ function handleMeshEvent(evt) {
     maybeNotify(msg);
   } else if (evt.NodeSeen) {
     const n = evt.NodeSeen;
-    nodes.value = { ...nodes.value, [n.id]: n };
+    // Merge rather than replace — a minimal Meshcore advertisement
+    // (path-advert without full identity) can arrive with an empty
+    // `long_name` or missing battery/snr. If we replaced wholesale,
+    // a valid "JardinRepeater" name would get wiped the next time a
+    // stripped advert from the same node arrived. Keep the richer
+    // value of each field between the existing entry and the new
+    // event.
+    const existing = nodes.value[n.id] || {};
+    const merged = { ...existing };
+    for (const [key, value] of Object.entries(n)) {
+      if (value === undefined || value === null || value === "") continue;
+      merged[key] = value;
+    }
+    // Always bubble up the freshest last_heard even if the event had
+    // none — we at least observed the node just now.
+    if (!merged.last_heard) {
+      merged.last_heard = Math.floor(Date.now() / 1000);
+    }
+    nodes.value = { ...nodes.value, [n.id]: merged };
   } else if (evt.ChannelInfo) {
     const c = evt.ChannelInfo;
     channels.value = { ...channels.value, [c.index]: c };

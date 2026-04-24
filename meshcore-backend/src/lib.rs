@@ -396,17 +396,39 @@ fn contact_to_node(c: &meshcore_rs::events::Contact) -> MeshEvent {
         battery_level: None,
         voltage: None,
         snr: None,
-        last_heard: if c.last_advert == 0 {
-            None
-        } else {
-            Some(c.last_advert as i64)
-        },
+        // `c.last_advert` comes from the firmware's contact cache.
+        // On ESP32 targets without a persistent RTC it's often an
+        // uptime-since-boot counter rather than a real unix epoch,
+        // which made the UI show nonsense like "709 days ago". Only
+        // accept it if it looks plausibly recent (within ± 1 year
+        // of our wall clock) — otherwise leave it None and let the
+        // live observation path (Advertisement / incoming message
+        // events) populate `last_heard` with our own `Utc::now()`
+        // when we actually hear from the peer.
+        last_heard: plausible_unix_seconds(c.last_advert),
         hops_away: if c.path_len < 0 {
             None
         } else {
             Some(c.path_len as u32)
         },
     })
+}
+
+/// Accepts a u32 "seconds" value only if it looks like a unix epoch
+/// within ± 1 year of now; otherwise returns `None`. Defends against
+/// firmware that exposes uptime-since-boot under a timestamp name.
+fn plausible_unix_seconds(secs: u32) -> Option<i64> {
+    if secs == 0 {
+        return None;
+    }
+    let ts = i64::from(secs);
+    let now = chrono::Utc::now().timestamp();
+    const ONE_YEAR_SECS: i64 = 365 * 24 * 3600;
+    if (now - ts).abs() <= ONE_YEAR_SECS {
+        Some(ts)
+    } else {
+        None
+    }
 }
 
 /// Translate one meshcore-rs event to zero, one, or multiple generic
