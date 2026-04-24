@@ -32,6 +32,8 @@ const ACK_PENDING_TTL: Duration = Duration::from_secs(300);
 struct ConfigCache {
     lora: Option<protobufs::config::LoRaConfig>,
     device: Option<protobufs::config::DeviceConfig>,
+    network: Option<protobufs::config::NetworkConfig>,
+    mqtt: Option<protobufs::module_config::MqttConfig>,
 }
 
 /// Encodes a single channel as a Meshtastic share URL:
@@ -262,6 +264,22 @@ impl MeshBackend for MeshtasticBackend {
                             MeshCommand::SetDeviceRole { role } => {
                                 let Some(api) = stream_api.as_mut() else { continue };
                                 set_device_role(api, &mut router, &config_cache, role, &event_tx).await;
+                            }
+                            MeshCommand::SetNetworkConfig { wifi_enabled, wifi_ssid, wifi_psk } => {
+                                let Some(api) = stream_api.as_mut() else { continue };
+                                set_network_config(
+                                    api, &mut router, &config_cache,
+                                    wifi_enabled, wifi_ssid, wifi_psk, &event_tx,
+                                ).await;
+                            }
+                            MeshCommand::SetMqttConfig { enabled, address, username, password, encryption_enabled, tls_enabled, map_reporting_enabled, root } => {
+                                let Some(api) = stream_api.as_mut() else { continue };
+                                set_mqtt_config(
+                                    api, &mut router, &config_cache,
+                                    enabled, address, username, password,
+                                    encryption_enabled, tls_enabled, map_reporting_enabled, root,
+                                    &event_tx,
+                                ).await;
                             }
                             MeshCommand::SendReaction { local_id, channel, to, reply_to_packet_id, emoji } => {
                                 let Some(api) = stream_api.as_mut() else { continue };
@@ -916,6 +934,120 @@ async fn set_device_role(
     }
 }
 
+/// Overlay user-changed fields over the radio's current `NetworkConfig`.
+/// Triggers a firmware reboot because WiFi mode flipping also toggles
+/// BLE on most ESP32 targets.
+#[instrument(
+    skip(api, router, cache, event_tx, wifi_psk),
+    fields(wifi_enabled, ssid_len = wifi_ssid.len(), psk_set = !wifi_psk.is_empty())
+)]
+#[allow(clippy::too_many_arguments)]
+async fn set_network_config(
+    api: &mut meshtastic::api::ConnectedStreamApi<meshtastic::api::state::Configured>,
+    router: &mut LocalRouter,
+    cache: &ConfigCache,
+    wifi_enabled: bool,
+    wifi_ssid: String,
+    wifi_psk: String,
+    event_tx: &mpsc::Sender<MeshEvent>,
+) {
+    // Need a baseline — we don't want to overwrite fields like
+    // `ntp_server`, `eth_enabled`, `address_mode`, `ipv4_config` that
+    // the user hasn't touched in the UI.
+    let Some(base) = cache.network.clone() else {
+        send_err(
+            event_tx,
+            "radio has not yet reported its current NetworkConfig — wait for ConfigComplete before writing"
+                .into(),
+        )
+        .await;
+        return;
+    };
+    if wifi_ssid.len() > 32 {
+        send_err(event_tx, "WiFi SSID too long (max 32 chars)".into()).await;
+        return;
+    }
+    if !wifi_psk.is_empty() && wifi_psk.len() < 8 {
+        // WPA2 mandates at least 8 chars. An empty PSK = open network is allowed.
+        send_err(event_tx, "WiFi PSK must be empty (open) or ≥ 8 chars (WPA2)".into()).await;
+        return;
+    }
+
+    let network = protobufs::config::NetworkConfig {
+        wifi_enabled,
+        wifi_ssid,
+        wifi_psk,
+        ..base
+    };
+    let config = protobufs::Config {
+        payload_variant: Some(protobufs::config::PayloadVariant::Network(network)),
+    };
+    info!("writing NetworkConfig");
+    match api.update_config(router, config).await {
+        Ok(()) => info!("NetworkConfig write sent; radio will reboot"),
+        Err(e) => {
+            warn!(error = %e, "NetworkConfig write failed");
+            send_err(event_tx, format!("NetworkConfig write: {}", e)).await;
+        }
+    }
+}
+
+/// Overlay user-changed fields over the radio's current `MqttConfig`.
+/// Defaults for the official Meshtastic broker are baked into the UI
+/// layer (empty `address` = firmware default `mqtt.meshtastic.org`).
+#[instrument(
+    skip(api, router, cache, event_tx, password),
+    fields(enabled, addr_len = address.len(), password_set = !password.is_empty(), map = map_reporting_enabled)
+)]
+#[allow(clippy::too_many_arguments)]
+async fn set_mqtt_config(
+    api: &mut meshtastic::api::ConnectedStreamApi<meshtastic::api::state::Configured>,
+    router: &mut LocalRouter,
+    cache: &ConfigCache,
+    enabled: bool,
+    address: String,
+    username: String,
+    password: String,
+    encryption_enabled: bool,
+    tls_enabled: bool,
+    map_reporting_enabled: bool,
+    root: String,
+    event_tx: &mpsc::Sender<MeshEvent>,
+) {
+    let Some(base) = cache.mqtt.clone() else {
+        send_err(
+            event_tx,
+            "radio has not yet reported its current MqttConfig — wait for ConfigComplete before writing"
+                .into(),
+        )
+        .await;
+        return;
+    };
+
+    let mqtt = protobufs::module_config::MqttConfig {
+        enabled,
+        address,
+        username,
+        password,
+        encryption_enabled,
+        tls_enabled,
+        map_reporting_enabled,
+        root,
+        ..base
+    };
+    let module_config = protobufs::ModuleConfig {
+        payload_variant: Some(protobufs::module_config::PayloadVariant::Mqtt(mqtt)),
+    };
+    info!("writing MqttConfig");
+    match api.update_module_config(router, module_config).await {
+        Ok(()) => info!("MqttConfig write sent"),
+        Err(e) => {
+            warn!(error = %e, "MqttConfig write failed");
+            send_err(event_tx, format!("MqttConfig write: {}", e)).await;
+        }
+    }
+}
+
 /// Best-effort send on the event channel. If the receiver has been dropped
 /// (typically because the UI is shutting down), we log at debug — there is
 /// nothing actionable to do from the backend side.
@@ -1099,6 +1231,11 @@ async fn handle_packet(
         PayloadVariant::Config(cfg) => {
             if let Some(var) = cfg.payload_variant {
                 handle_config_variant(var, event_tx, config_cache).await;
+            }
+        }
+        PayloadVariant::ModuleConfig(cfg) => {
+            if let Some(var) = cfg.payload_variant {
+                handle_module_config_variant(var, event_tx, config_cache).await;
             }
         }
         PayloadVariant::ConfigCompleteId(id) => {
@@ -1346,7 +1483,57 @@ async fn handle_config_variant(
             )
             .await;
         }
+        CPV::Network(net) => {
+            debug!(
+                wifi_enabled = net.wifi_enabled,
+                ssid_len = net.wifi_ssid.len(),
+                eth_enabled = net.eth_enabled,
+                "network config received"
+            );
+            let info = MeshEvent::NetworkInfo {
+                network: Network::Meshtastic,
+                wifi_enabled: net.wifi_enabled,
+                wifi_ssid: net.wifi_ssid.clone(),
+                eth_enabled: net.eth_enabled,
+            };
+            config_cache.network = Some(net);
+            emit(event_tx, info).await;
+        }
         _ => {}
+    }
+}
+
+/// Same overlay pattern as `handle_config_variant` but for the
+/// ModuleConfig oneof. We only care about the MQTT variant today —
+/// everything else (serial, telemetry module, canned messages, …) is
+/// dropped silently.
+async fn handle_module_config_variant(
+    var: protobufs::module_config::PayloadVariant,
+    event_tx: &mpsc::Sender<MeshEvent>,
+    config_cache: &mut ConfigCache,
+) {
+    use protobufs::module_config::PayloadVariant as MPV;
+    if let MPV::Mqtt(mqtt) = var {
+        debug!(
+            enabled = mqtt.enabled,
+            addr = %mqtt.address,
+            encrypted = mqtt.encryption_enabled,
+            tls = mqtt.tls_enabled,
+            map = mqtt.map_reporting_enabled,
+            "mqtt config received"
+        );
+        let info = MeshEvent::MqttInfo {
+            network: Network::Meshtastic,
+            enabled: mqtt.enabled,
+            address: mqtt.address.clone(),
+            username: mqtt.username.clone(),
+            encryption_enabled: mqtt.encryption_enabled,
+            tls_enabled: mqtt.tls_enabled,
+            map_reporting_enabled: mqtt.map_reporting_enabled,
+            root: mqtt.root.clone(),
+        };
+        config_cache.mqtt = Some(mqtt);
+        emit(event_tx, info).await;
     }
 }
 

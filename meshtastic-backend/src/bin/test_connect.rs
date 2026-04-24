@@ -164,6 +164,28 @@ async fn main() -> anyhow::Result<()> {
                     uptime_seconds
                 );
             }
+            MeshEvent::NetworkInfo {
+                wifi_enabled,
+                wifi_ssid,
+                eth_enabled,
+                ..
+            } => {
+                println!(
+                    "[NET] wifi={} ssid={:?} eth={}",
+                    wifi_enabled, wifi_ssid, eth_enabled
+                );
+            }
+            MeshEvent::MqttInfo {
+                enabled,
+                address,
+                map_reporting_enabled,
+                ..
+            } => {
+                println!(
+                    "[MQTT] enabled={} addr={:?} map={}",
+                    enabled, address, map_reporting_enabled
+                );
+            }
         }
     }
     Ok(())
