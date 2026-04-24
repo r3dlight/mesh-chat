@@ -369,6 +369,8 @@ async fn connect_device(
                 MeshEvent::Reaction { .. } => "Reaction",
                 MeshEvent::Position { .. } => "Position",
                 MeshEvent::Telemetry { .. } => "Telemetry",
+                MeshEvent::NetworkInfo { .. } => "NetworkInfo",
+                MeshEvent::MqttInfo { .. } => "MqttInfo",
                 MeshEvent::Error { .. } => "Error",
             };
             info!(kind, "forwarding mesh event to webview");
@@ -792,6 +794,67 @@ async fn send_reaction(
     Ok(local_id)
 }
 
+/// Write WiFi credentials to the radio. Empty PSK = open network.
+/// Caller must have shown a confirm dialog since changing WiFi
+/// settings reboots the firmware.
+#[tauri::command]
+async fn set_network_config(
+    state: State<'_, Arc<AppState>>,
+    wifi_enabled: bool,
+    wifi_ssid: String,
+    wifi_psk: String,
+) -> Result<(), String> {
+    if wifi_ssid.len() > 32 {
+        return Err("WiFi SSID too long (max 32 chars)".into());
+    }
+    if !wifi_psk.is_empty() && wifi_psk.len() < 8 {
+        return Err("WiFi PSK must be empty (open) or ≥ 8 chars (WPA2)".into());
+    }
+    let tx = state.cmd_tx.lock().await;
+    let tx = tx.as_ref().ok_or("not connected")?;
+    tx.send(MeshCommand::SetNetworkConfig {
+        wifi_enabled,
+        wifi_ssid,
+        wifi_psk,
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Write MQTT module config. For the public Meshtastic broker, the
+/// firmware accepts an empty `address` (falls back to its built-in
+/// default `mqtt.meshtastic.org`). Anything the user types wins.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn set_mqtt_config(
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+    address: String,
+    username: String,
+    password: String,
+    encryption_enabled: bool,
+    tls_enabled: bool,
+    map_reporting_enabled: bool,
+    root: String,
+) -> Result<(), String> {
+    let tx = state.cmd_tx.lock().await;
+    let tx = tx.as_ref().ok_or("not connected")?;
+    tx.send(MeshCommand::SetMqttConfig {
+        enabled,
+        address,
+        username,
+        password,
+        encryption_enabled,
+        tls_enabled,
+        map_reporting_enabled,
+        root,
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Wipe all persisted chat history. Requires a prior UI confirm dialog —
 /// the destructive action is irreversible. Closes and drops the current
 /// `HistoryWriter` before unlinking the file (Windows refuses to delete
@@ -959,6 +1022,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             get_network,
             send_reaction,
             send_position,
+            set_network_config,
+            set_mqtt_config,
             clear_history,
             shutdown,
         ])
