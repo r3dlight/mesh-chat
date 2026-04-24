@@ -894,6 +894,44 @@ async function submitRadioConfig() {
   }
 }
 
+// Map SNR (dB) to a qualitative bucket + bar count. Thresholds tuned
+// from Meshtastic community guidance: SpF9-to-SpF12 demodulates down
+// to about -20 dB SNR, so anything above +5 dB is "rock solid", 0..5
+// "good", -5..0 "marginal", below that "unusable soon".
+function signalClass(snr) {
+  if (snr == null) return "signal-none";
+  if (snr >= 5) return "signal-great";
+  if (snr >= 0) return "signal-good";
+  if (snr >= -5) return "signal-weak";
+  return "signal-bad";
+}
+// RSSI (dBm, negative — closer to 0 = stronger). -60 is line-of-sight
+// city, -100 is barely receiving.
+function rssiClass(rssi) {
+  if (rssi == null) return "signal-none";
+  if (rssi >= -80) return "signal-great";
+  if (rssi >= -95) return "signal-good";
+  if (rssi >= -110) return "signal-weak";
+  return "signal-bad";
+}
+function signalBars(snr) {
+  if (snr == null) return "—";
+  if (snr >= 10) return "▁▃▅▇█";
+  if (snr >= 5) return "▁▃▅▇░";
+  if (snr >= 0) return "▁▃▅░░";
+  if (snr >= -5) return "▁▃░░░";
+  if (snr >= -10) return "▁░░░░";
+  return "░░░░░";
+}
+
+async function refreshNodes() {
+  try {
+    await invoke("refresh_nodes");
+  } catch (e) {
+    status.value = `refresh error: ${e}`;
+  }
+}
+
 function positionOf(nodeId) {
   return positions.value[nodeId] || null;
 }
@@ -1309,6 +1347,21 @@ function handleMeshEvent(evt) {
       (myId.value && m.from === myId.value) ||
       m.from === "me" ||
       m.local_id != null;
+    // Stash the per-packet SNR / RSSI on the sender's node entry so
+    // the Nodes modal can show an up-to-date signal estimate even
+    // between NodeInfo broadcasts (which are rare on Meshtastic).
+    if (!isMe && m.from && (m.rx_snr != null || m.rx_rssi != null)) {
+      const existing = nodes.value[m.from] || { id: m.from };
+      nodes.value = {
+        ...nodes.value,
+        [m.from]: {
+          ...existing,
+          snr: m.rx_snr ?? existing.snr ?? null,
+          last_rssi: m.rx_rssi ?? existing.last_rssi ?? null,
+          last_heard: m.timestamp || Math.floor(Date.now() / 1000),
+        },
+      };
+    }
     const msg = {
       channel: m.channel,
       from: m.from,
@@ -2387,14 +2440,30 @@ onBeforeUnmount(() => {
       <div class="panel-card panel-card-lg">
         <div class="panel-head">
           <h3>⧉ Nodes ({{ sortedNodes.length }})</h3>
-          <button type="button" class="panel-x" @click="openPanel = null">
-            ✕
-          </button>
+          <div class="panel-head-actions">
+            <button
+              type="button"
+              class="panel-head-btn"
+              :disabled="!connected || currentNetwork !== 'meshcore'"
+              :title="currentNetwork === 'meshcore'
+                ? 'Re-query the firmware contact cache (Meshcore only)'
+                : 'Meshtastic auto-refreshes from incoming packets — nothing to pull manually'"
+              @click="refreshNodes"
+            >
+              🔄 Refresh
+            </button>
+            <button type="button" class="panel-x" @click="openPanel = null">
+              ✕
+            </button>
+          </div>
         </div>
         <p class="panel-hint">
           All nodes heard on the mesh, sorted by last-heard.
           <strong>Click Start DM</strong> to open an end-to-end encrypted
-          thread with a peer.
+          thread with a peer. Signal bars = SNR at our radio; higher is
+          stronger reception (a node <strong>right next to you</strong>
+          typically reads +5 dB or better; a remote repeater at range
+          might drop to -10 dB before becoming unreadable).
         </p>
         <table class="nodes-table">
           <thead>
@@ -2405,6 +2474,7 @@ onBeforeUnmount(() => {
               <th>alias</th>
               <th>batt</th>
               <th>SNR</th>
+              <th>RSSI</th>
               <th>hops</th>
               <th>seen</th>
               <th>pos</th>
@@ -2450,9 +2520,16 @@ onBeforeUnmount(() => {
                 <span v-else-if="n.battery_level > 100">⚡PWR</span>
                 <span v-else>{{ n.battery_level }}%</span>
               </td>
-              <td>
+              <td :class="signalClass(n.snr)" class="signal-cell">
                 <span v-if="n.snr == null">—</span>
-                <span v-else>{{ (n.snr >= 0 ? "+" : "") + n.snr.toFixed(1) }}dB</span>
+                <template v-else>
+                  <span class="signal-bars" :title="`SNR ${n.snr.toFixed(1)} dB`">{{ signalBars(n.snr) }}</span>
+                  <span class="signal-value">{{ (n.snr >= 0 ? "+" : "") + n.snr.toFixed(1) }}</span>
+                </template>
+              </td>
+              <td :class="rssiClass(n.last_rssi)" class="signal-cell">
+                <span v-if="n.last_rssi == null">—</span>
+                <span v-else class="signal-value">{{ n.last_rssi }} dBm</span>
               </td>
               <td>{{ n.hops_away == null ? "—" : n.hops_away }}</td>
               <td>{{ relativeSeen(n.last_heard) }}</td>
@@ -2481,7 +2558,7 @@ onBeforeUnmount(() => {
               </td>
             </tr>
             <tr v-if="sortedNodes.length === 0">
-              <td colspan="10" class="empty-row">
+              <td colspan="11" class="empty-row">
                 No nodes heard yet — waiting on first NodeInfo packets.
               </td>
             </tr>
@@ -3963,6 +4040,66 @@ onBeforeUnmount(() => {
   text-align: center;
   color: var(--fg-dim);
   padding: 1.5rem 0;
+}
+
+/* Signal strength cells in the Nodes modal */
+.signal-cell {
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+.signal-bars {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  letter-spacing: 0;
+  font-size: 0.9rem;
+  margin-right: 0.35rem;
+  line-height: 1;
+}
+.signal-value {
+  opacity: 0.85;
+}
+.signal-great {
+  color: #3ddc84;
+}
+.signal-good {
+  color: #b8c94a;
+}
+.signal-weak {
+  color: #f2a735;
+}
+.signal-bad {
+  color: var(--danger);
+}
+.signal-none {
+  color: var(--fg-dim);
+}
+
+/* Right-aligned action cluster in panel headers (Refresh + close).
+ * Replaces the single close-button-on-the-right pattern; keeps tight
+ * spacing so the title + actions fit on one line. */
+.panel-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.panel-head-btn {
+  background: var(--bg-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  color: var(--fg-muted);
+  padding: 0.3rem 0.7rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.panel-head-btn:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--bg-3);
+}
+.panel-head-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* Inline position indicator on received bubbles */
