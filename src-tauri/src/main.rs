@@ -794,6 +794,20 @@ async fn send_reaction(
     Ok(local_id)
 }
 
+/// Ask the backend to re-emit its known-nodes list. Useful when a
+/// remote node got renamed and the UI still shows the old cached
+/// name. Meshcore re-queries its contact table; Meshtastic surfaces
+/// a "not supported" error event.
+#[tauri::command]
+async fn refresh_nodes(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let tx = state.cmd_tx.lock().await;
+    let tx = tx.as_ref().ok_or("not connected")?;
+    tx.send(MeshCommand::RefreshNodes)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Write WiFi credentials to the radio. Empty PSK = open network.
 /// Caller must have shown a confirm dialog since changing WiFi
 /// settings reboots the firmware.
@@ -1024,6 +1038,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             send_position,
             set_network_config,
             set_mqtt_config,
+            refresh_nodes,
             clear_history,
             shutdown,
         ])
