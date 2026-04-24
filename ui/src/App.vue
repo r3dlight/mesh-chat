@@ -227,12 +227,103 @@ const clearHistoryOpen = ref(false);
 const clearHistoryBusy = ref(false);
 const clearHistoryError = ref(null);
 
+// Latest NetworkConfig / MqttConfig reported by the Meshtastic radio.
+// Pre-fills the Uplink modal; the WiFi PSK / MQTT password are never
+// carried back from the firmware (same privacy stance as channel PSKs).
+const networkInfo = ref(null);
+const mqttInfo = ref(null);
+
+// Uplink (WiFi + MQTT) modal state.
+const uplinkOpen = ref(false);
+const uplinkForm = ref({
+  wifi_enabled: false,
+  wifi_ssid: "",
+  wifi_psk: "",
+  enabled: false,
+  address: "",
+  username: "",
+  password: "",
+  encryption_enabled: true,
+  tls_enabled: false,
+  map_reporting_enabled: true,
+  root: "msh",
+});
+const uplinkConfirm = ref(false);
+const uplinkBusy = ref(false);
+const uplinkError = ref(null);
+
 // In-space search. Ctrl+F toggles the bar; Esc clears and closes.
 // Filter runs inside `filteredMessages` so the match count is just the
 // length of the result array.
 const searchVisible = ref(false);
 const searchQuery = ref("");
 const searchInputEl = ref(null);
+
+function openUplinkModal() {
+  uplinkError.value = null;
+  uplinkConfirm.value = false;
+  uplinkBusy.value = false;
+  // Pre-fill from cached configs. PSK / password never come back
+  // from the firmware so those stay empty; the user retypes.
+  uplinkForm.value = {
+    wifi_enabled: networkInfo.value?.wifi_enabled ?? false,
+    wifi_ssid: networkInfo.value?.wifi_ssid ?? "",
+    wifi_psk: "",
+    enabled: mqttInfo.value?.enabled ?? false,
+    address: mqttInfo.value?.address ?? "",
+    username: mqttInfo.value?.username ?? "",
+    password: "",
+    encryption_enabled: mqttInfo.value?.encryption_enabled ?? true,
+    tls_enabled: mqttInfo.value?.tls_enabled ?? false,
+    map_reporting_enabled: mqttInfo.value?.map_reporting_enabled ?? true,
+    root: mqttInfo.value?.root ?? "msh",
+  };
+  uplinkOpen.value = true;
+}
+
+async function submitUplink() {
+  uplinkError.value = null;
+  const f = uplinkForm.value;
+  if (f.wifi_enabled && !f.wifi_ssid.trim()) {
+    uplinkError.value = "WiFi enabled but SSID is empty";
+    return;
+  }
+  if (f.wifi_psk && f.wifi_psk.length < 8) {
+    uplinkError.value = "WiFi password must be empty (open) or ≥ 8 chars (WPA2)";
+    return;
+  }
+  // Two-step confirm for the combined write.
+  if (!uplinkConfirm.value) {
+    uplinkConfirm.value = true;
+    return;
+  }
+  uplinkBusy.value = true;
+  try {
+    // Network first so the radio reboots into the new WiFi before
+    // MQTT tries to dial out. `update_config(Network)` triggers a
+    // firmware reset on most builds.
+    await invoke("set_network_config", {
+      wifiEnabled: f.wifi_enabled,
+      wifiSsid: f.wifi_ssid,
+      wifiPsk: f.wifi_psk,
+    });
+    await invoke("set_mqtt_config", {
+      enabled: f.enabled,
+      address: f.address,
+      username: f.username,
+      password: f.password,
+      encryptionEnabled: f.encryption_enabled,
+      tlsEnabled: f.tls_enabled,
+      mapReportingEnabled: f.map_reporting_enabled,
+      root: f.root,
+    });
+    uplinkOpen.value = false;
+  } catch (e) {
+    uplinkError.value = e?.message || String(e);
+  } finally {
+    uplinkBusy.value = false;
+  }
+}
 
 function openClearHistoryModal() {
   clearHistoryError.value = null;
@@ -1304,6 +1395,10 @@ function handleMeshEvent(evt) {
         timestamp: p.timestamp,
       },
     };
+  } else if (evt.NetworkInfo) {
+    networkInfo.value = evt.NetworkInfo;
+  } else if (evt.MqttInfo) {
+    mqttInfo.value = evt.MqttInfo;
   } else if (evt.Telemetry) {
     const t = evt.Telemetry;
     telemetry.value = {
@@ -1793,6 +1888,160 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
+    </div>
+
+    <!-- Uplink modal (WiFi + MQTT) -->
+    <div
+      v-if="uplinkOpen"
+      class="panel-overlay"
+      @click.self="uplinkOpen = false"
+    >
+      <form
+        class="panel-card panel-card-lg"
+        @submit.prevent="submitUplink"
+      >
+        <div class="panel-head">
+          <h3>📡 WiFi + MQTT uplink</h3>
+          <button type="button" class="panel-x" @click="uplinkOpen = false">
+            ✕
+          </button>
+        </div>
+        <div class="radio-warn">
+          ⚠ Writing WiFi settings reboots the radio. For your node to
+          appear on <code>meshmap.net</code> you need all three:
+          <strong>WiFi connected</strong>, <strong>MQTT enabled</strong>
+          with <strong>map reporting</strong>, and a known position
+          (GPS or broadcast via 📍 pos). The primary channel must also
+          have uplink enabled — we set that when you create channels.
+        </div>
+
+        <h4 class="section-hint">WiFi</h4>
+        <label class="field">
+          <span>Enable WiFi</span>
+          <input
+            type="checkbox"
+            v-model="uplinkForm.wifi_enabled"
+            :disabled="uplinkBusy || uplinkConfirm"
+          />
+        </label>
+        <label class="field">
+          <span>SSID</span>
+          <input
+            type="text"
+            v-model="uplinkForm.wifi_ssid"
+            maxlength="32"
+            :disabled="uplinkBusy || uplinkConfirm"
+            placeholder="your-network"
+          />
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input
+            type="password"
+            v-model="uplinkForm.wifi_psk"
+            :disabled="uplinkBusy || uplinkConfirm"
+            placeholder="(leave empty for open / unchanged)"
+            autocomplete="off"
+          />
+        </label>
+        <p class="panel-hint" style="margin: -0.2rem 0 0.5rem">
+          Password is write-only — the firmware never echoes it back,
+          so this field starts empty even after a successful write. To
+          keep the current password unchanged, leave it empty; it'll
+          be overwritten with empty-string only if you explicitly type
+          nothing AND toggle WiFi off. (Known firmware quirk.)
+        </p>
+
+        <h4 class="section-hint">MQTT</h4>
+        <label class="field">
+          <span>Enable MQTT</span>
+          <input
+            type="checkbox"
+            v-model="uplinkForm.enabled"
+            :disabled="uplinkBusy || uplinkConfirm"
+          />
+        </label>
+        <label class="field">
+          <span>Broker address</span>
+          <input
+            type="text"
+            v-model="uplinkForm.address"
+            :disabled="uplinkBusy || uplinkConfirm"
+            placeholder="mqtt.meshtastic.org (default if empty)"
+          />
+        </label>
+        <label class="field">
+          <span>Username</span>
+          <input
+            type="text"
+            v-model="uplinkForm.username"
+            :disabled="uplinkBusy || uplinkConfirm"
+            placeholder="meshdev (default if empty)"
+          />
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input
+            type="password"
+            v-model="uplinkForm.password"
+            :disabled="uplinkBusy || uplinkConfirm"
+            placeholder="large4cats (default if empty)"
+            autocomplete="off"
+          />
+        </label>
+        <label class="field">
+          <span>Encrypt packets</span>
+          <input
+            type="checkbox"
+            v-model="uplinkForm.encryption_enabled"
+            :disabled="uplinkBusy || uplinkConfirm"
+          />
+        </label>
+        <label class="field">
+          <span>Use TLS</span>
+          <input
+            type="checkbox"
+            v-model="uplinkForm.tls_enabled"
+            :disabled="uplinkBusy || uplinkConfirm"
+          />
+        </label>
+        <label class="field">
+          <span>Map reporting</span>
+          <input
+            type="checkbox"
+            v-model="uplinkForm.map_reporting_enabled"
+            :disabled="uplinkBusy || uplinkConfirm"
+          />
+        </label>
+        <label class="field">
+          <span>Topic root</span>
+          <input
+            type="text"
+            v-model="uplinkForm.root"
+            :disabled="uplinkBusy || uplinkConfirm"
+            placeholder="msh"
+          />
+        </label>
+
+        <div v-if="uplinkError" class="unlock-error">⚠ {{ uplinkError }}</div>
+        <div class="panel-actions">
+          <button type="button" @click="uplinkOpen = false">Cancel</button>
+          <button
+            type="submit"
+            class="btn-primary"
+            :class="{ 'btn-danger': uplinkConfirm }"
+            :disabled="uplinkBusy"
+          >
+            {{
+              uplinkBusy
+                ? "Writing…"
+                : uplinkConfirm
+                  ? "Yes, write and reboot radio"
+                  : "Review"
+            }}
+          </button>
+        </div>
+      </form>
     </div>
 
     <!-- Radio config modal -->
@@ -2464,6 +2713,15 @@ onBeforeUnmount(() => {
             >
               <span class="tb-icon">📊</span>
               <span class="tb-label">stats</span>
+            </button>
+            <button
+              class="tb-btn"
+              @click="openUplinkModal"
+              title="WiFi + MQTT uplink (needed to appear on meshmap.net)"
+              :disabled="!connected || currentNetwork !== 'meshtastic'"
+            >
+              <span class="tb-icon">📡</span>
+              <span class="tb-label">uplink</span>
             </button>
             <button
               class="tb-btn tb-btn-danger"
