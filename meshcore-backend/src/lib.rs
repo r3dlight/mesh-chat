@@ -155,7 +155,30 @@ impl MeshBackend for MeshcoreBackend {
         // arrive from the mesh.
         match mc.commands().lock().await.get_contacts(0).await {
             Ok(contacts) => {
-                debug!(count = contacts.len(), "meshcore contacts loaded");
+                let named = contacts.iter().filter(|c| !c.adv_name.is_empty()).count();
+                let nameless = contacts.len() - named;
+                info!(
+                    total = contacts.len(),
+                    named,
+                    nameless,
+                    "meshcore contacts loaded"
+                );
+                if nameless > 0 {
+                    warn!(
+                        nameless,
+                        "some contacts have no name — the firmware only heard path-adverts for them. \
+                         Ask each remote to re-broadcast its full identity (CMD_SEND_ADVERT / \
+                         `Send advert` in the official client)."
+                    );
+                }
+                for c in &contacts {
+                    debug!(
+                        prefix = %c.prefix_hex(),
+                        name = %c.adv_name,
+                        path_len = c.path_len,
+                        "meshcore contact"
+                    );
+                }
                 for c in contacts {
                     emit(&event_tx, contact_to_node(&c)).await;
                 }

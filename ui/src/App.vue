@@ -2483,6 +2483,18 @@ onBeforeUnmount(() => {
           typically reads +5 dB or better; a remote repeater at range
           might drop to -10 dB before becoming unreadable).
         </p>
+        <p
+          v-if="currentNetwork === 'meshcore' && sortedNodes.some(n => !n.long_name)"
+          class="panel-hint"
+          style="color: var(--accent)"
+        >
+          ⚠ Some nodes show up as <code>…xxxx</code> — that means the
+          firmware has only heard a path-advert for them and doesn't
+          know their name yet. Either ask the remote to re-broadcast
+          its identity (<em>Send advert</em> in the official Meshcore
+          client, or reboot the remote), or type a memorable name in
+          the <strong>alias</strong> column below.
+        </p>
         <table class="nodes-table">
           <thead>
             <tr>
@@ -2519,7 +2531,10 @@ onBeforeUnmount(() => {
               <td class="mono">{{ n.id }}</td>
               <td>
                 <span v-if="n.id === myId" class="self-badge">●</span>
-                {{ n.long_name || "—" }}
+                <span v-if="n.long_name">{{ n.long_name }}</span>
+                <span v-else class="no-name" title="No full advert received yet — ask the remote to re-broadcast its identity, or set an alias in the next column">
+                  …{{ (n.id || "").slice(-4) }}
+                </span>
                 <span class="short">{{ n.short_name ? `(${n.short_name})` : "" }}</span>
               </td>
               <td>
@@ -4053,6 +4068,15 @@ onBeforeUnmount(() => {
   color: var(--fg-dim);
   font-size: 0.78rem;
   margin-left: 0.3rem;
+}
+/* Shown in the name column when the firmware hasn't yet received a
+ * full-identity advert for a peer. Keep the pubkey-suffix discreet so
+ * the user isn't tricked into thinking it's the real name. */
+.no-name {
+  color: var(--fg-dim);
+  font-style: italic;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
 }
 .empty-row {
   text-align: center;
