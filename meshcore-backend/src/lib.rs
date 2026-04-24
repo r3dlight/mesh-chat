@@ -585,6 +585,28 @@ async fn handle_cmd(mc: &Arc<MeshCore>, cmd: MeshCommand, event_tx: &mpsc::Sende
             )
             .await;
         }
+        MeshCommand::RefreshNodes => {
+            // Re-query the firmware's contact cache. A remote rename
+            // only propagates to the local radio on the next advert
+            // from that remote (≈30 min cycle), so this can still
+            // show stale data — but at least it surfaces anything
+            // that landed between our startup sweep and now.
+            match mc.commands().lock().await.get_contacts(0).await {
+                Ok(contacts) => {
+                    debug!(count = contacts.len(), "meshcore contacts refreshed");
+                    for c in contacts {
+                        emit(event_tx, contact_to_node(&c)).await;
+                        if let Some(pos) = position_from_contact(&c) {
+                            emit(event_tx, pos).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "meshcore refresh get_contacts failed");
+                    send_err(event_tx, format!("meshcore refresh: {}", e)).await;
+                }
+            }
+        }
         MeshCommand::SendReaction { local_id, .. } => {
             // Meshcore's companion protocol has no emoji-reaction primitive.
             // We refuse rather than fake it as a plain text message (that

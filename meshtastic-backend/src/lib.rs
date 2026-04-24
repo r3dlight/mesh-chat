@@ -296,6 +296,17 @@ impl MeshBackend for MeshtasticBackend {
                                     local_id, latitude, longitude, &event_tx,
                                 ).await;
                             }
+                            MeshCommand::RefreshNodes => {
+                                // Meshtastic has no "query all nodes" primitive;
+                                // the firmware pushes NodeInfo packets on its
+                                // own when it hears them over LoRa. Surface the
+                                // limitation so the UI can tell the user their
+                                // refresh click did nothing.
+                                send_err(
+                                    &event_tx,
+                                    "Meshtastic auto-refreshes node list from incoming packets — no explicit refresh possible".into(),
+                                ).await;
+                            }
                             MeshCommand::Shutdown => {
                                 info!(network = Network::Meshtastic.as_str(), "shutdown requested");
                                 if let Some(api) = stream_api.take() {
