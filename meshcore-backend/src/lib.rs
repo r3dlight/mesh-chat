@@ -68,10 +68,61 @@ impl MeshBackend for MeshcoreBackend {
         let mc = MeshCore::serial(&self.serial_port, DEFAULT_BAUD).await?;
         info!(port = %self.serial_port, "meshcore serial opened");
 
+        // The crate's default timeout is 3s, which is tight for a
+        // radio that just finished re-enumerating over USB CDC after
+        // our serial open (or after a fresh flash). Bump it to 10s
+        // so every subsequent command has room to breathe.
+        mc.set_default_timeout(std::time::Duration::from_secs(10))
+            .await;
+
         // APP_START is mandatory — the radio won't emit any events until
         // the host has identified itself. The response carries the node's
-        // public key and advertised name.
-        let self_info = mc.commands().lock().await.send_appstart().await?;
+        // public key and advertised name. Retry a couple of times with
+        // backoff because the USB CDC endpoint can still be settling
+        // right when we open the port; a second APP_START 500ms later
+        // usually lands cleanly.
+        let self_info = {
+            const APPSTART_ATTEMPTS: &[u64] = &[0, 500, 1_200, 2_500];
+            let mut last_err: Option<meshcore_rs::Error> = None;
+            let mut out = None;
+            for (i, delay_ms) in APPSTART_ATTEMPTS.iter().enumerate() {
+                if *delay_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+                }
+                match mc.commands().lock().await.send_appstart().await {
+                    Ok(info) => {
+                        out = Some(info);
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(
+                            attempt = i + 1,
+                            max = APPSTART_ATTEMPTS.len(),
+                            error = %e,
+                            "meshcore APP_START failed, will retry"
+                        );
+                        last_err = Some(e);
+                    }
+                }
+            }
+            match out {
+                Some(info) => info,
+                None => {
+                    // Close the connection cleanly so the serial port
+                    // is released before we propagate the error.
+                    if let Err(e) = mc.disconnect().await {
+                        debug!(error = %e, "meshcore disconnect after appstart failure");
+                    }
+                    return Err(anyhow::anyhow!(
+                        "meshcore APP_START: all {} attempts failed — {}",
+                        APPSTART_ATTEMPTS.len(),
+                        last_err
+                            .map(|e| e.to_string())
+                            .unwrap_or_else(|| "unknown error".into())
+                    ));
+                }
+            }
+        };
         let my_id = hex_prefix(&self_info.public_key);
         info!(my_id = %my_id, name = %self_info.name, "meshcore appstart done");
 
