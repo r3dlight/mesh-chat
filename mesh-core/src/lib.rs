@@ -375,6 +375,15 @@ pub enum MeshCommand {
         wifi_ssid: String,
         wifi_psk: String,
     },
+    /// Ask the backend to re-emit its known-nodes list so the UI can
+    /// recover from stale cached entries (e.g. a remote node that got
+    /// renamed but whose old name is still in the firmware's contact
+    /// cache). Each backend does what it can:
+    /// - Meshcore: re-runs `get_contacts(0)` and emits a NodeSeen per
+    ///   contact.
+    /// - Meshtastic: no "query all nodes" primitive; emits an Error
+    ///   event explaining the limitation.
+    RefreshNodes,
     /// Write MQTT module config. Setting `map_reporting_enabled = true`
     /// with `enabled = true` plus WiFi up is what gets the node on
     /// meshmap.net / meshtastic.org/map.
