@@ -10,7 +10,7 @@
 
 ---
 
-> ⚠ **Tested only on Linux (Ubuntu 24.04) with a Heltec WiFi LoRa 32 V4
+> ⚠ **Tested only on Linux (Debian/Ubuntu) with a Heltec WiFi LoRa 32 V4
 > running Meshtastic firmware 2.7.15.** Windows and macOS builds are
 > produced by CI but **have not been verified on hardware**. Other
 > Meshtastic-compatible boards should work over USB-CDC but are untested.
