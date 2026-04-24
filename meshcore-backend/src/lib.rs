@@ -520,6 +520,20 @@ async fn handle_cmd(mc: &Arc<MeshCore>, cmd: MeshCommand, event_tx: &mpsc::Sende
             )
             .await;
         }
+        MeshCommand::SetNetworkConfig { .. } => {
+            send_err(
+                event_tx,
+                "WiFi / Ethernet config requires Meshtastic — Meshcore companion protocol has no equivalent write path".into(),
+            )
+            .await;
+        }
+        MeshCommand::SetMqttConfig { .. } => {
+            send_err(
+                event_tx,
+                "MQTT config requires Meshtastic — Meshcore does not ship an MQTT module".into(),
+            )
+            .await;
+        }
         MeshCommand::SendReaction { local_id, .. } => {
             // Meshcore's companion protocol has no emoji-reaction primitive.
             // We refuse rather than fake it as a plain text message (that

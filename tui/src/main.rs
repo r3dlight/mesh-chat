@@ -923,6 +923,12 @@ fn apply_mesh_event(state: &mut AppState, evt: MeshEvent) {
                 "telemetry ignored by TUI"
             );
         }
+        MeshEvent::NetworkInfo { wifi_ssid, .. } => {
+            debug!(ssid = %wifi_ssid, "network info ignored by TUI");
+        }
+        MeshEvent::MqttInfo { address, .. } => {
+            debug!(addr = %address, "mqtt info ignored by TUI");
+        }
         MeshEvent::Error { network, message } => {
             state.status = format!("error · {} · {}", network.as_str(), message);
             warn!(network = network.as_str(), %message, "mesh error");
