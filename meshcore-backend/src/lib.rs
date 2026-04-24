@@ -515,21 +515,39 @@ fn map_event(ev: MeshCoreEvent, my_id: &str) -> Vec<MeshEvent> {
         // at startup handles full hydration, and `NewContact` events cover
         // deltas afterwards.
         (EventType::Advertisement, EP::Advertisement(a)) => {
+            // Two kinds of adverts on the Meshcore air:
+            // - "full-identity" adverts carry the node's advertised
+            //   name, coords etc.
+            // - "path-only" adverts carry just the pubkey prefix and
+            //   are used for route discovery.
+            //
+            // We only surface the full ones to the UI as `NodeSeen`.
+            // Path-only adverts (empty `name`) would otherwise flood
+            // the Nodes modal with anonymous `…xxxx` entries the
+            // user can't DM anyway — and on a busy mesh they arrive
+            // every few seconds.
             let mut out = vec![];
             if let Some(pos) = position_from_advertisement(&a) {
                 out.push(pos);
             }
-            out.push(MeshEvent::NodeSeen(NodeInfo {
-                network: Network::Meshcore,
-                id: bytes_hex(&a.prefix),
-                long_name: a.name,
-                short_name: String::new(),
-                battery_level: None,
-                voltage: None,
-                snr: None,
-                last_heard: Some(chrono::Utc::now().timestamp()),
-                hops_away: None,
-            }));
+            if !a.name.trim().is_empty() {
+                out.push(MeshEvent::NodeSeen(NodeInfo {
+                    network: Network::Meshcore,
+                    id: bytes_hex(&a.prefix),
+                    long_name: a.name,
+                    short_name: String::new(),
+                    battery_level: None,
+                    voltage: None,
+                    snr: None,
+                    last_heard: Some(chrono::Utc::now().timestamp()),
+                    hops_away: None,
+                }));
+            } else {
+                debug!(
+                    prefix = %bytes_hex(&a.prefix),
+                    "path-only advert dropped (no identity)"
+                );
+            }
             out
         }
         _ => vec![],
