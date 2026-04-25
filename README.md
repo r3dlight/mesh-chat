@@ -75,14 +75,36 @@ without touching UI code.
   (✓✓ delivery ack, emoji reactions) are gated off when on Meshcore —
   the UI shows an explicit tooltip.
 - Select via `[general] network = "meshtastic" | "meshcore"` in
-  `config.toml`. Defaults to `meshtastic` for backwards compat.
+  `config.toml`, or pick directly in the connect card on first launch
+  — the UI persists the choice for next time.
+
+**Meshcore administration**
+
+- Contacts are tagged by kind (chat / **repeater** / **room server**) so
+  the UI gates the Start DM flow accordingly. Repeaters and room servers
+  get a `Command` button instead and treat each message as an admin
+  command (`ver`, `clock`, `status`, `reboot`, …).
+- **Login / logout** for admin sessions on a repeater: enter the admin
+  password, the radio sends `CMD_SEND_LOGIN` and waits for
+  `LoginSuccess`; a 45 s watchdog surfaces a clear error otherwise. The
+  login bar shows the active session with a countdown to expiry.
+- **Send Advert** broadcasts our full identity so neighbours cache our
+  pubkey — fixes the "remote silently drops my DMs" pattern. Fired
+  automatically at connect (zero-hop) and also available as a button.
+- **Forget node** removes a contact from the radio's cache via the raw
+  `CMD_REMOVE_CONTACT` (the upstream crate's helper sends 6 bytes where
+  the firmware expects 32, so we bypass it).
+- **Clock sync at connect**: the host's wall-clock is pushed to the
+  radio so OTA timestamps stay monotonic — without this, replay-attack
+  guards on a repeater silently drop our login requests after the
+  radio's RTC drifts.
 
 **Per-message actions**
 
-- **Reply** (↩): inline composer bar with the quoted preview. The wire
+- **Reply**: inline composer bar with the quoted preview. The wire
   payload is prefixed `> @author: quote\n…` so non-mesh-chat clients
   still see the reference.
-- **Forward** (↗): pick any other space from a modal; sends the text
+- **Forward**: pick any other space from a modal; sends the text
   and switches to the destination.
 - **Emoji reactions** (Meshtastic only): 8 inline emojis under every
   received bubble, one click to send. Uses the native `emoji=1` proto
@@ -97,13 +119,13 @@ without touching UI code.
 
 - **In-space search** (Ctrl+F): case-insensitive filter on message
   bodies and reply quotes, live match count.
-- **Position sharing** (📍): broadcasts your GPS via `PortNum::PositionApp`
+- **Position sharing**: broadcasts your GPS via `PortNum::PositionApp`
   (Meshtastic) or `set_coords` (Meshcore). Received positions render as
   a pill under the sender's bubbles with an OpenStreetMap link, plus a
   column in the Nodes modal.
-- **Radio telemetry** (📊): periodic `DeviceMetrics` packets decoded
-  into a panel — battery, voltage, channel utilisation, TX airtime %,
-  uptime per node.
+- **Radio telemetry**: periodic `DeviceMetrics` packets decoded into a
+  panel — battery, voltage, channel utilisation, TX airtime %, uptime
+  per node.
 
 **Desktop notifications**
 
@@ -122,14 +144,15 @@ without touching UI code.
 
 - **Read**: LoRa region, modem preset, hop limit, bandwidth, SF, coding
   rate, TX power, device role.
-- **Write** (Tauri, `⚙ radio` button / `r` shortcut): region, modem
-  preset, device role, hop limit (0–7), TX enabled, TX power (0–30 dBm).
+- **Write** (Tauri, `radio` toolbar button / `r` shortcut): region,
+  modem preset, device role, hop limit (0–7), TX enabled, TX power
+  (0–30 dBm).
   The backend overlays only user-edited fields on top of the last
   config snapshot from the radio, so untouched fields (e.g.
   `sx126x_rx_boosted_gain`) keep their current value. Two-step confirm
   with a diff preview before the write hits the wire.
-- Node identity (`long_name` / `short_name`) is writable from the
-  `👤` toolbar button in Tauri or `e` in the Settings modal of the TUI.
+- Node identity (`long_name` / `short_name`) is writable from the `me`
+  toolbar button in Tauri or `e` in the Settings modal of the TUI.
 
 **Device discovery**
 
@@ -309,17 +332,20 @@ node.
 
 Open the app, enter your history passphrase if encryption is on, then:
 
-- **Sidebar toolbar buttons**: `👤 me` (identity), `# chans` (channel
-  CRUD), `⧉ nodes` (mesh roster with Start DM).
+- **Sidebar toolbar buttons** (each tile pairs an SVG icon with a label):
+  `me` (identity), `chans` (channel CRUD), `nodes` (mesh roster with
+  Start DM), `pos` (share position), `stats` (telemetry panel),
+  `uplink` (WiFi + MQTT), `radio` (LoRa config — destructive, gated by
+  a confirm step), `wipe` (erase history — same gate).
 - **Sidebar list**: all channels + DM threads, click to switch.
 - **Header chips**: history encryption state, channel privacy, live
   connection status (pulsing green = OK).
 
 ### Starting a DM
 
-1. Click `⧉ nodes` in the sidebar.
+1. Click `nodes` in the sidebar.
 2. Click the peer row you want to message.
-3. Click `✉ Start DM`.
+3. Click `Start DM`.
 
 The modal closes, a new thread appears in the sidebar, and the current
 space switches to it. Reply with Enter; incoming DMs land in the
@@ -399,9 +425,9 @@ mv ~/.local/share/mesh-chat/history.jsonl{,.corrupt}
 
 **Frontends indicate state** with a chip at the top:
 
-- `📄 plaintext` — encryption disabled in config
-- `🔒 locked` — encryption enabled, passphrase modal showing
-- `🔒 history` — unlocked and writing live
+- info icon · `plaintext` — encryption disabled in config
+- closed-lock icon · `locked` — encryption enabled, passphrase modal showing
+- open-lock icon · `history` — unlocked and writing live
 
 Dump the decrypted history to stdout (TUI):
 
@@ -493,7 +519,7 @@ GitHub Actions (`.github/workflows/ci.yml`):
 - [ ] TUI parity with the GUI for newer features: emoji reactions,
       received positions, aliases / favorites, forward, telemetry panel
 - [ ] Inline map view for received positions (currently just an
-      OpenStreetMap link via the 📍 pill)
+      OpenStreetMap link via the position pill)
 - [ ] Surface more Meshtastic telemetry variants in the stats panel
       (environment, power, health) — only DeviceMetrics is decoded today
 - [ ] Investigate Meshcore v2 once it adds sender attribution on
