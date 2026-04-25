@@ -397,6 +397,7 @@ impl AppState {
     /// Broadcast sentinels per protocol:
     ///   - Meshcore channel sends: `to = "^all"`
     ///   - Meshtastic channel sends: `to = "!ffffffff"` (broadcast node id)
+    ///
     /// Anything else in `to` refers to a specific peer → it's a DM, both
     /// when we received it (`to == my_id`) and when we sent it
     /// (`from == my_id`). Without this distinction, the local echo we
