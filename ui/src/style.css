@@ -161,3 +161,135 @@ code {
   background: rgba(255, 210, 58, 0.3);
   color: var(--fg);
 }
+
+/* Decorative mesh-network background shown behind the unlock card.
+ * 12 nodes with 17 edges drawn over a 1000×700 viewbox: lines have a
+ * long stroke-dasharray with animated dashoffset so a small dash slides
+ * along each link like a packet on a wire, and nodes pulse gently.
+ * These rules live in style.css (not the scoped <style> block in
+ * App.vue) because Vue's scoped attribute doesn't reach inline SVG
+ * children — the <line>/<circle> elements stayed unstyled when the
+ * rules were scoped, leaving an invisible empty SVG. */
+.unlock-mesh-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 1;
+  z-index: 1;
+}
+
+/* Animated mesh in the *empty middle* of the topbar — not stretched
+ * across the whole width. The logo on the left and chips on the right
+ * own their bands, so we constrain the mesh to a centered ~520px band
+ * that fits exactly in the spacer between them. Opacity is bumped now
+ * that it doesn't fight with text on top of it. */
+.topbar-mesh-bg {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(48vw, 520px);
+  height: 100%;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 1;
+}
+/* Topbar-specific overrides — slightly brighter and thicker than the
+ * unlock-screen mesh so the small 3-node triangle reads clearly. */
+.topbar-mesh-bg .mesh-edges line {
+  stroke: rgba(106, 182, 255, 0.95);
+  stroke-width: 2.2;
+  stroke-dasharray: 4 14;
+}
+.topbar-mesh-bg .mesh-nodes circle {
+  fill: rgba(255, 210, 58, 1);
+  filter: drop-shadow(0 0 8px rgba(255, 210, 58, 0.85));
+}
+.topbar-mesh-bg .mesh-node-rings circle {
+  stroke: rgba(255, 210, 58, 0.9);
+  stroke-width: 1.2;
+}
+.mesh-edges line {
+  stroke: rgba(106, 182, 255, 0.7);
+  stroke-width: 1.5;
+  fill: none;
+  /* Dot pattern: 3px dash + 16px gap = 19px cycle. The whole pattern
+   * slides via dashoffset so the path is always readable AND conveys
+   * flow direction, without crowding the bigger picture. */
+  stroke-dasharray: 3 16;
+  stroke-linecap: round;
+  animation: mesh-trail 4s linear infinite;
+}
+.mesh-edges line:nth-child(5n + 1) { animation-duration: 3.8s; animation-delay: 0s; }
+.mesh-edges line:nth-child(5n + 2) { animation-duration: 5.2s; animation-delay: -1.4s; }
+.mesh-edges line:nth-child(5n + 3) { animation-duration: 4.4s; animation-delay: -2.6s; }
+.mesh-edges line:nth-child(5n + 4) { animation-duration: 6s; animation-delay: -1.8s; }
+.mesh-edges line:nth-child(5n + 5) { animation-duration: 4s; animation-delay: -3s; }
+
+/* Solid pulsing dot at each node. */
+.mesh-nodes circle {
+  fill: rgba(255, 210, 58, 0.95);
+  filter: drop-shadow(0 0 6px rgba(255, 210, 58, 0.7));
+  animation: mesh-pulse 3.4s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.mesh-nodes circle:nth-child(3n + 1) { animation-delay: -0.4s; }
+.mesh-nodes circle:nth-child(3n + 2) { animation-delay: -1.7s; }
+.mesh-nodes circle:nth-child(3n + 3) { animation-delay: -2.6s; }
+
+/* Sonar-style expanding ring around each node. Stroke only, scale
+ * outward, fade to nothing — gives a "this node is broadcasting" feel.
+ * Each ring offsets in time so they don't all bloom in unison. */
+.mesh-node-rings circle {
+  fill: none;
+  stroke: rgba(255, 210, 58, 0.65);
+  stroke-width: 0.8;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: mesh-ring 3.4s ease-out infinite;
+}
+.mesh-node-rings circle:nth-child(3n + 1) { animation-delay: -0.4s; }
+.mesh-node-rings circle:nth-child(3n + 2) { animation-delay: -1.7s; }
+.mesh-node-rings circle:nth-child(3n + 3) { animation-delay: -2.6s; }
+
+@keyframes mesh-trail {
+  to {
+    stroke-dashoffset: -120;
+  }
+}
+@keyframes mesh-pulse {
+  0%, 100% {
+    opacity: 0.55;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.25);
+  }
+}
+@keyframes mesh-ring {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.7;
+    stroke-width: 1.2;
+  }
+  100% {
+    transform: scale(6);
+    opacity: 0;
+    stroke-width: 0.4;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mesh-edges line,
+  .mesh-nodes circle,
+  .mesh-node-rings circle {
+    animation: none;
+  }
+  .mesh-node-rings circle {
+    display: none;
+  }
+}

@@ -7,6 +7,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import Icon from "./Icon.vue";
 // Logo is in public/ so it's served as a plain static asset at its
 // native MIME type. Going through a JS import (even with `?url`) breaks
 // on the WebKit webview Tauri uses on Linux ("image/svg+xml is not a
@@ -1664,7 +1665,7 @@ function handleMeshEvent(evt) {
         delete next[peer];
         loginError.value = next;
       }
-      status.value = `🔓 authenticated on ${label}`;
+      status.value = `authenticated on ${label}`;
     } else {
       // Logout/failure both clear the login state — same UX whether the
       // password was wrong or the user explicitly logged out.
@@ -1677,7 +1678,7 @@ function handleMeshEvent(evt) {
       if (msg !== "logged out") {
         loginError.value = { ...loginError.value, [peer]: msg };
       }
-      status.value = `🔒 ${label}: ${msg}`;
+      status.value = `${label}: ${msg}`;
     }
   } else if (evt.NodeRemoved) {
     const { id } = evt.NodeRemoved;
@@ -1921,6 +1922,60 @@ onBeforeUnmount(() => {
   <div class="shell">
     <!-- Unlock / setup modal (blocks the rest of the UI until resolved) -->
     <div v-if="needsUnlock" class="unlock-overlay">
+      <svg
+        class="unlock-mesh-bg"
+        viewBox="0 0 1000 700"
+        preserveAspectRatio="xMidYMid slice"
+        aria-hidden="true"
+      >
+        <g class="mesh-edges">
+          <line x1="120" y1="140" x2="320" y2="90" />
+          <line x1="320" y1="90" x2="540" y2="170" />
+          <line x1="540" y1="170" x2="770" y2="110" />
+          <line x1="120" y1="140" x2="200" y2="320" />
+          <line x1="320" y1="90" x2="440" y2="280" />
+          <line x1="540" y1="170" x2="440" y2="280" />
+          <line x1="770" y1="110" x2="680" y2="330" />
+          <line x1="200" y1="320" x2="440" y2="280" />
+          <line x1="440" y1="280" x2="680" y2="330" />
+          <line x1="680" y1="330" x2="900" y2="280" />
+          <line x1="200" y1="320" x2="140" y2="510" />
+          <line x1="440" y1="280" x2="380" y2="540" />
+          <line x1="680" y1="330" x2="620" y2="480" />
+          <line x1="900" y1="280" x2="860" y2="520" />
+          <line x1="140" y1="510" x2="380" y2="540" />
+          <line x1="380" y1="540" x2="620" y2="480" />
+          <line x1="620" y1="480" x2="860" y2="520" />
+        </g>
+        <g class="mesh-node-rings">
+          <circle cx="120" cy="140" r="3" />
+          <circle cx="320" cy="90" r="3" />
+          <circle cx="540" cy="170" r="3" />
+          <circle cx="770" cy="110" r="3" />
+          <circle cx="200" cy="320" r="3" />
+          <circle cx="440" cy="280" r="3" />
+          <circle cx="680" cy="330" r="3" />
+          <circle cx="900" cy="280" r="3" />
+          <circle cx="140" cy="510" r="3" />
+          <circle cx="380" cy="540" r="3" />
+          <circle cx="620" cy="480" r="3" />
+          <circle cx="860" cy="520" r="3" />
+        </g>
+        <g class="mesh-nodes">
+          <circle cx="120" cy="140" r="3" />
+          <circle cx="320" cy="90" r="3" />
+          <circle cx="540" cy="170" r="3" />
+          <circle cx="770" cy="110" r="3" />
+          <circle cx="200" cy="320" r="3" />
+          <circle cx="440" cy="280" r="3" />
+          <circle cx="680" cy="330" r="3" />
+          <circle cx="900" cy="280" r="3" />
+          <circle cx="140" cy="510" r="3" />
+          <circle cx="380" cy="540" r="3" />
+          <circle cx="620" cy="480" r="3" />
+          <circle cx="860" cy="520" r="3" />
+        </g>
+      </svg>
       <form class="unlock-card" @submit.prevent="submitUnlock">
         <div class="unlock-brand">
           <img :src="logoUrl" alt="mesh-chat" class="unlock-logo" />
@@ -1992,9 +2047,9 @@ onBeforeUnmount(() => {
     >
       <form class="panel-card" @submit.prevent="submitIdentity">
         <div class="panel-head">
-          <h3>👤 Node identity</h3>
+          <h3><Icon name="pencil" /> Node identity</h3>
           <button type="button" class="panel-x" @click="openPanel = null">
-            ✕
+            <Icon name="close" />
           </button>
         </div>
         <p class="panel-hint">
@@ -2040,7 +2095,7 @@ onBeforeUnmount(() => {
         <div class="panel-head">
           <h3># Channels</h3>
           <button type="button" class="panel-x" @click="openPanel = null">
-            ✕
+            <Icon name="close" />
           </button>
         </div>
         <p class="panel-hint">
@@ -2189,9 +2244,9 @@ onBeforeUnmount(() => {
     >
       <div class="panel-card">
         <div class="panel-head">
-          <h3>✉ Share channel</h3>
+          <h3><Icon name="mail" /> Share channel</h3>
           <button type="button" class="panel-x" @click="shareOpen = false">
-            ✕
+            <Icon name="close" />
           </button>
         </div>
         <p class="panel-hint" v-if="shareData.url">
@@ -2282,9 +2337,9 @@ onBeforeUnmount(() => {
         @submit.prevent="submitUplink"
       >
         <div class="panel-head">
-          <h3>📡 WiFi + MQTT uplink</h3>
+          <h3><Icon name="wifi" /> WiFi + MQTT uplink</h3>
           <button type="button" class="panel-x" @click="uplinkOpen = false">
-            ✕
+            <Icon name="close" />
           </button>
         </div>
         <div class="radio-warn">
@@ -2292,7 +2347,7 @@ onBeforeUnmount(() => {
           appear on <code>meshmap.net</code> you need all three:
           <strong>WiFi connected</strong>, <strong>MQTT enabled</strong>
           with <strong>map reporting</strong>, and a known position
-          (GPS or broadcast via 📍 pos). The primary channel must also
+          (GPS or broadcast via the pos button). The primary channel must also
           have uplink enabled — we set that when you create channels.
         </div>
 
@@ -2433,9 +2488,9 @@ onBeforeUnmount(() => {
     >
       <form class="panel-card panel-card-lg" @submit.prevent="submitRadioConfig">
         <div class="panel-head">
-          <h3>⚙ Radio config</h3>
+          <h3><Icon name="gear" /> Radio config</h3>
           <button type="button" class="panel-x" @click="openPanel = null">
-            ✕
+            <Icon name="close" />
           </button>
         </div>
         <div class="radio-warn">
@@ -2534,13 +2589,13 @@ onBeforeUnmount(() => {
     >
       <div class="panel-card">
         <div class="panel-head">
-          <h3>🗑 Wipe chat history</h3>
+          <h3><Icon name="wipe" /> Wipe chat history</h3>
           <button
             type="button"
             class="panel-x"
             @click="clearHistoryOpen = false"
           >
-            ✕
+            <Icon name="close" />
           </button>
         </div>
         <div class="radio-warn">
@@ -2580,13 +2635,13 @@ onBeforeUnmount(() => {
     >
       <form class="panel-card" @submit.prevent="submitPosition">
         <div class="panel-head">
-          <h3>📍 Share position</h3>
+          <h3><Icon name="pin" /> Share position</h3>
           <button
             type="button"
             class="panel-x"
             @click="positionModalOpen = false"
           >
-            ✕
+            <Icon name="close" />
           </button>
         </div>
         <p class="panel-hint">
@@ -2648,9 +2703,9 @@ onBeforeUnmount(() => {
     >
       <div class="panel-card">
         <div class="panel-head">
-          <h3>↗ Forward message</h3>
+          <h3><Icon name="forward" /> Forward message</h3>
           <button type="button" class="panel-x" @click="forwardOpen = false">
-            ✕
+            <Icon name="close" />
           </button>
         </div>
         <p class="panel-hint">Pick a destination space. The message will be sent as-is, attributed to you.</p>
@@ -2670,9 +2725,9 @@ onBeforeUnmount(() => {
             </template>
             <template v-else>
               <span class="priv-dot dot-private" />
-              <span class="dm-icon">✉</span>
+              <span class="dm-icon"><Icon name="mail" /></span>
               <span>{{ displayName(s.peer) }}</span>
-              <span v-if="isFavorite(s.peer)" class="dm-fav">★</span>
+              <span v-if="isFavorite(s.peer)" class="dm-fav"><Icon name="star-filled" /></span>
               <span class="forward-meta">DM</span>
             </template>
           </li>
@@ -2692,9 +2747,9 @@ onBeforeUnmount(() => {
     >
       <div class="panel-card panel-card-lg">
         <div class="panel-head">
-          <h3>📊 Radio telemetry</h3>
+          <h3><Icon name="chart" /> Radio telemetry</h3>
           <button type="button" class="panel-x" @click="openPanel = null">
-            ✕
+            <Icon name="close" />
           </button>
         </div>
         <p class="panel-hint" v-if="currentNetwork === 'meshtastic'">
@@ -2732,7 +2787,7 @@ onBeforeUnmount(() => {
               </td>
               <td>
                 <span v-if="t.battery == null">—</span>
-                <span v-else-if="t.battery > 100">⚡PWR</span>
+                <span v-else-if="t.battery > 100"><Icon name="bolt" /> PWR</span>
                 <span v-else>{{ t.battery }}%</span>
               </td>
               <td>{{ t.voltage == null ? "—" : `${t.voltage.toFixed(2)}V` }}</td>
@@ -2767,7 +2822,7 @@ onBeforeUnmount(() => {
     >
       <div class="panel-card panel-card-xl">
         <div class="panel-head">
-          <h3>⧉ Nodes ({{ sortedNodes.length }})</h3>
+          <h3><Icon name="mesh-dots" /> Nodes ({{ sortedNodes.length }})</h3>
           <div class="panel-head-actions">
             <button
               type="button"
@@ -2776,8 +2831,8 @@ onBeforeUnmount(() => {
               title="Rebroadcast our full identity (pubkey + name + position) so neighbours cache us. Required for DMs to work — a remote that has never heard our advert will silently drop our messages."
               @click="sendAdvertSelf(true)"
             >
-              <span v-if="advertingSelf">⏳ Advertising…</span>
-              <span v-else>📣 Send Advert</span>
+              <span v-if="advertingSelf"><Icon name="hourglass" /> Advertising…</span>
+              <span v-else><Icon name="megaphone" /> Send Advert</span>
             </button>
             <button
               type="button"
@@ -2788,11 +2843,11 @@ onBeforeUnmount(() => {
                 : 'Meshtastic auto-refreshes from incoming packets — nothing to pull manually'"
               @click="refreshNodes"
             >
-              <span v-if="refreshingNodes">⏳ Refreshing…</span>
-              <span v-else>🔄 Refresh</span>
+              <span v-if="refreshingNodes"><Icon name="hourglass" /> Refreshing…</span>
+              <span v-else><Icon name="refresh" /> Refresh</span>
             </button>
             <button type="button" class="panel-x" @click="openPanel = null">
-              ✕
+              <Icon name="close" />
             </button>
           </div>
         </div>
@@ -2823,7 +2878,7 @@ onBeforeUnmount(() => {
         >
           💡 <strong>Remote can't receive your DMs?</strong> Meshcore
           silently drops messages from unknown senders. Click
-          <strong>📣 Send Advert</strong> above to broadcast your
+          <strong>Send Advert</strong> above to broadcast your
           identity so the remote caches your pubkey, then retry the
           DM after ~10&nbsp;s.
         </p>
@@ -2857,7 +2912,7 @@ onBeforeUnmount(() => {
                   :title="isFavorite(n.id) ? 'Unfavorite' : 'Favorite — pin to top'"
                   @click="toggleFavorite(n.id)"
                 >
-                  {{ isFavorite(n.id) ? "★" : "☆" }}
+                  <Icon :name="isFavorite(n.id) ? 'star-filled' : 'star'" />
                 </button>
               </td>
               <td class="mono">{{ n.id }}</td>
@@ -2872,12 +2927,12 @@ onBeforeUnmount(() => {
                   v-if="n.kind === 'Repeater'"
                   class="kind-tag kind-repeater"
                   title="Meshcore repeater — responds to admin commands (status, reboot, …), not chat"
-                >📡 repeater</span>
+                ><Icon name="tower" /> repeater</span>
                 <span
                   v-else-if="n.kind === 'RoomServer'"
                   class="kind-tag kind-room"
                   title="Meshcore room server — responds to admin commands, not chat"
-                >🏠 room</span>
+                ><Icon name="home" /> room</span>
               </td>
               <td>
                 <input
@@ -2892,7 +2947,7 @@ onBeforeUnmount(() => {
               </td>
               <td>
                 <span v-if="n.battery_level == null">—</span>
-                <span v-else-if="n.battery_level > 100">⚡PWR</span>
+                <span v-else-if="n.battery_level > 100"><Icon name="bolt" /> PWR</span>
                 <span v-else>{{ n.battery_level }}%</span>
               </td>
               <td :class="signalClass(n.snr)" class="signal-cell">
@@ -2917,7 +2972,7 @@ onBeforeUnmount(() => {
                   class="position-link"
                   :title="`${positionOf(n.id).latitude.toFixed(5)}, ${positionOf(n.id).longitude.toFixed(5)}`"
                 >
-                  📍
+                  <Icon name="pin" />
                 </a>
                 <span v-else>—</span>
               </td>
@@ -2936,10 +2991,10 @@ onBeforeUnmount(() => {
                   @click="startDmWithNode(n.id)"
                 >
                   <template v-if="n.kind === 'Repeater' || n.kind === 'RoomServer'">
-                    ⚙ Command
+                    <Icon name="gear" /> Command
                   </template>
                   <template v-else>
-                    ✉ Start DM
+                    <Icon name="mail" /> Start DM
                   </template>
                 </button>
                 <button
@@ -2949,7 +3004,7 @@ onBeforeUnmount(() => {
                   title="Forget this node — removes it from the radio's contact cache"
                   @click="forgetNode(n.id)"
                 >
-                  🗑
+                  <Icon name="trash" />
                 </button>
               </td>
             </tr>
@@ -2965,6 +3020,34 @@ onBeforeUnmount(() => {
 
     <!-- Top bar -->
     <header class="topbar">
+      <!-- Animated mesh-network background. Lives behind the logo/chips
+           via absolute positioning, very low opacity so it reads as
+           ambient brand decoration rather than foreground. Same
+           visual language as the unlock screen. -->
+      <svg
+        class="topbar-mesh-bg"
+        viewBox="0 0 600 80"
+        preserveAspectRatio="xMidYMid slice"
+        aria-hidden="true"
+      >
+        <g class="mesh-edges">
+          <line x1="80" y1="22" x2="220" y2="60" />
+          <line x1="220" y1="60" x2="380" y2="22" />
+          <line x1="380" y1="22" x2="520" y2="60" />
+        </g>
+        <g class="mesh-node-rings">
+          <circle cx="80" cy="22" r="3.5" />
+          <circle cx="220" cy="60" r="3.5" />
+          <circle cx="380" cy="22" r="3.5" />
+          <circle cx="520" cy="60" r="3.5" />
+        </g>
+        <g class="mesh-nodes">
+          <circle cx="80" cy="22" r="3.5" />
+          <circle cx="220" cy="60" r="3.5" />
+          <circle cx="380" cy="22" r="3.5" />
+          <circle cx="520" cy="60" r="3.5" />
+        </g>
+      </svg>
       <div class="brand-block">
         <img :src="logoUrl" alt="" class="brand-logo" />
         <span class="brand-label">mesh-chat</span>
@@ -2978,7 +3061,7 @@ onBeforeUnmount(() => {
 
       <div class="chips">
         <span v-if="!historyState" class="chip chip-muted" title="Waiting for history state…">
-          ⏳ loading
+          <Icon name="hourglass" /> loading
         </span>
         <span
           v-if="historyState"
@@ -3000,13 +3083,18 @@ onBeforeUnmount(() => {
               : 'history is plaintext (set [history] encrypt = true in config.toml)'
           "
         >
-          {{
+          <Icon
+            v-if="historyState.encrypt_requested"
+            :name="historyState.unlocked ? 'lock-open' : 'lock-closed'"
+          />
+          <Icon v-else name="info" />
+          <span>{{
             historyState.encrypt_requested
               ? historyState.unlocked
-                ? "🔒 history"
-                : "🔒 locked"
-              : "📄 plaintext"
-          }}
+                ? "history"
+                : "locked"
+              : "plaintext"
+          }}</span>
         </span>
         <span
           v-if="currentNetwork !== 'none'"
@@ -3026,13 +3114,15 @@ onBeforeUnmount(() => {
                 : 'unknown backend'
           "
         >
-          {{
-            currentNetwork === "meshtastic"
-              ? "📡 meshtastic"
-              : currentNetwork === "meshcore"
-                ? "🌐 meshcore"
-                : currentNetwork
-          }}
+          <Icon
+            v-if="currentNetwork === 'meshtastic'"
+            name="radar"
+          />
+          <Icon
+            v-else-if="currentNetwork === 'meshcore'"
+            name="mesh-dots"
+          />
+          <span>{{ currentNetwork }}</span>
         </span>
         <span
           v-if="connected"
@@ -3063,13 +3153,21 @@ onBeforeUnmount(() => {
           <div class="connected-line">
             <span class="connected-label">backend</span>
             <span class="connected-value">
-              {{
+              <Icon
+                v-if="currentNetwork === 'meshtastic'"
+                name="radar"
+              />
+              <Icon
+                v-else-if="currentNetwork === 'meshcore'"
+                name="mesh-dots"
+              />
+              <span>{{
                 currentNetwork === "meshtastic"
-                  ? "📡 Meshtastic"
+                  ? "Meshtastic"
                   : currentNetwork === "meshcore"
-                    ? "🌐 Meshcore"
+                    ? "Meshcore"
                     : currentNetwork
-              }}
+              }}</span>
             </span>
           </div>
           <div class="connected-line" v-if="myId">
@@ -3093,7 +3191,7 @@ onBeforeUnmount(() => {
               :class="{ active: selectedBackend === 'meshtastic' }"
               @click="selectedBackend = 'meshtastic'"
             >
-              📡 Meshtastic
+              <Icon name="radar" /> Meshtastic
             </button>
             <button
               type="button"
@@ -3101,7 +3199,7 @@ onBeforeUnmount(() => {
               :class="{ active: selectedBackend === 'meshcore' }"
               @click="selectedBackend = 'meshcore'"
             >
-              🌐 Meshcore
+              <Icon name="mesh-dots" /> Meshcore
             </button>
           </div>
           <select v-model="selectedPort" class="full">
@@ -3148,7 +3246,7 @@ onBeforeUnmount(() => {
               title="Edit node name"
               :disabled="!connected"
             >
-              <span class="tb-icon">👤</span>
+              <span class="tb-icon"><Icon name="pencil" size="20" /></span>
               <span class="tb-label">me</span>
             </button>
             <button
@@ -3166,7 +3264,7 @@ onBeforeUnmount(() => {
               title="Nodes on the mesh"
               :disabled="!connected"
             >
-              <span class="tb-icon">⧉</span>
+              <span class="tb-icon"><Icon name="mesh-dots" size="20" /></span>
               <span class="tb-label">nodes</span>
             </button>
             <button
@@ -3175,7 +3273,7 @@ onBeforeUnmount(() => {
               title="Share your position"
               :disabled="!connected"
             >
-              <span class="tb-icon">📍</span>
+              <span class="tb-icon"><Icon name="pin" size="20" /></span>
               <span class="tb-label">pos</span>
             </button>
             <button
@@ -3184,7 +3282,7 @@ onBeforeUnmount(() => {
               title="Radio telemetry (battery, channel util, airtime)"
               :disabled="!connected"
             >
-              <span class="tb-icon">📊</span>
+              <span class="tb-icon"><Icon name="chart" size="20" /></span>
               <span class="tb-label">stats</span>
             </button>
             <button
@@ -3193,7 +3291,7 @@ onBeforeUnmount(() => {
               title="WiFi + MQTT uplink (needed to appear on meshmap.net)"
               :disabled="!connected || currentNetwork !== 'meshtastic'"
             >
-              <span class="tb-icon">📡</span>
+              <span class="tb-icon"><Icon name="wifi" size="20" /></span>
               <span class="tb-label">uplink</span>
             </button>
             <button
@@ -3202,7 +3300,7 @@ onBeforeUnmount(() => {
               title="Radio config (region, preset, role) — advanced"
               :disabled="!connected"
             >
-              <span class="tb-icon">⚙</span>
+              <span class="tb-icon"><Icon name="gear" size="20" /></span>
               <span class="tb-label">radio</span>
             </button>
             <button
@@ -3210,13 +3308,13 @@ onBeforeUnmount(() => {
               @click="openClearHistoryModal"
               title="Erase all stored chat history — destructive"
             >
-              <span class="tb-icon">🗑</span>
+              <span class="tb-icon"><Icon name="wipe" size="20" /></span>
               <span class="tb-label">wipe</span>
             </button>
           </div>
 
           <div class="section">
-            <div class="section-title">Spaces</div>
+            <div class="section-title">Channels</div>
           <ul class="channel-list">
             <li
               v-for="s in allSpaces"
@@ -3236,9 +3334,9 @@ onBeforeUnmount(() => {
               <template v-else>
                 <span class="priv-dot dot-private" />
                 <span class="chan-name">
-                  <span class="dm-icon">✉</span>
+                  <span class="dm-icon"><Icon name="mail" /></span>
                   {{ displayName(s.peer) }}
-                  <span v-if="isFavorite(s.peer)" class="dm-fav" title="Favorite">★</span>
+                  <span v-if="isFavorite(s.peer)" class="dm-fav" title="Favorite"><Icon name="star-filled" /></span>
                 </span>
                 <span
                   v-if="dmUnread[s.peer]"
@@ -3251,7 +3349,7 @@ onBeforeUnmount(() => {
             </li>
           </ul>
           <div class="section-hint" v-if="connected && sortedNodes.length > 0">
-            Tip: open <strong>⧉ nodes</strong> to start a DM with a peer.
+            Tip: open <strong>nodes</strong> to start a DM with a peer.
           </div>
           </div> <!-- /.section -->
         </template>
@@ -3285,7 +3383,7 @@ onBeforeUnmount(() => {
               class="priv-dot"
               :class="isPrivateChannel ? 'dot-private' : 'dot-public'"
             />
-            <span v-if="isDmSpace" class="chat-dm-icon">✉</span>
+            <span v-if="isDmSpace" class="chat-dm-icon"><Icon name="mail" /></span>
             <span class="chat-name">{{ currentLabel }}</span>
             <span v-if="isChannelSpace" class="chat-meta">
               #{{ currentSpace.idx }}
@@ -3321,13 +3419,17 @@ onBeforeUnmount(() => {
           "
         >
           <span class="admin-bar-icon">
-            {{
-              isLoggedIn(currentSpace.peer)
-                ? '🔓'
-                : loginError[currentSpace.peer]
-                  ? '⚠'
-                  : '🔒'
-            }}
+            <Icon
+              v-if="isLoggedIn(currentSpace.peer)"
+              name="lock-open"
+              :size="20"
+            />
+            <Icon
+              v-else-if="loginError[currentSpace.peer]"
+              name="warning"
+              :size="20"
+            />
+            <Icon v-else name="lock-closed" :size="20" />
           </span>
           <span class="admin-bar-text">
             <template v-if="isLoggedIn(currentSpace.peer)">
@@ -3350,13 +3452,15 @@ onBeforeUnmount(() => {
               :disabled="loginPending === currentSpace.peer"
               @click="repeaterLogin(currentSpace.peer)"
             >
-              {{
-                loginPending === currentSpace.peer
-                  ? '⏳ Authenticating…'
-                  : loginError[currentSpace.peer]
-                    ? '🔄 Retry'
-                    : '🔐 Login'
-              }}
+              <template v-if="loginPending === currentSpace.peer">
+                <Icon name="hourglass" /> Authenticating…
+              </template>
+              <template v-else-if="loginError[currentSpace.peer]">
+                <Icon name="refresh" /> Retry
+              </template>
+              <template v-else>
+                <Icon name="lock-closed" /> Login
+              </template>
             </button>
             <button
               v-else
@@ -3364,13 +3468,13 @@ onBeforeUnmount(() => {
               class="btn-ghost sm"
               @click="repeaterLogout(currentSpace.peer)"
             >
-              🚪 Logout
+              <Icon name="door-out" /> Logout
             </button>
           </div>
         </div>
 
         <div v-if="searchVisible" class="search-bar">
-          <span class="search-icon">🔍</span>
+          <span class="search-icon"><Icon name="search" /></span>
           <input
             ref="searchInputEl"
             v-model="searchQuery"
@@ -3388,7 +3492,7 @@ onBeforeUnmount(() => {
             title="Close (Esc)"
             @click="closeSearch"
           >
-            ✕
+            <Icon name="close" />
           </button>
         </div>
 
@@ -3452,7 +3556,7 @@ onBeforeUnmount(() => {
                     title="Reply to this message"
                     @click="startReply(m)"
                   >
-                    ↩
+                    <Icon name="reply" />
                   </button>
                   <button
                     type="button"
@@ -3461,7 +3565,7 @@ onBeforeUnmount(() => {
                     title="Forward this message"
                     @click="openForward(m.text)"
                   >
-                    ↗
+                    <Icon name="forward" />
                   </button>
                 </div>
                 <div v-if="m.replyToText" class="reply-quote">
@@ -3476,7 +3580,7 @@ onBeforeUnmount(() => {
                   rel="noopener"
                   :title="`Last reported: ${positionOf(m.from).latitude.toFixed(5)}, ${positionOf(m.from).longitude.toFixed(5)}`"
                 >
-                  📍 {{ positionOf(m.from).latitude.toFixed(4) }},
+                  <Icon name="pin" /> {{ positionOf(m.from).latitude.toFixed(4) }},
                   {{ positionOf(m.from).longitude.toFixed(4) }}
                 </a>
                 <div
@@ -3512,7 +3616,7 @@ onBeforeUnmount(() => {
             </div>
           </transition-group>
           <div v-if="filteredMessages.length === 0" class="empty">
-            <div class="empty-icon">✉</div>
+            <div class="empty-icon"><Icon name="mail" :size="40" /></div>
             <div v-if="isDmSpace">
               empty DM thread — type and hit Enter to send privately
             </div>
@@ -3523,7 +3627,7 @@ onBeforeUnmount(() => {
 
         <div v-if="replyingTo" class="reply-bar">
           <div class="reply-bar-body">
-            <div class="reply-bar-label">↩ Replying to {{ replyingTo.author }}</div>
+            <div class="reply-bar-label"><Icon name="reply" /> Replying to {{ replyingTo.author }}</div>
             <div class="reply-bar-quote">{{ replyingTo.text }}</div>
           </div>
           <button
@@ -3532,7 +3636,7 @@ onBeforeUnmount(() => {
             title="Cancel reply"
             @click="cancelReply"
           >
-            ✕
+            <Icon name="close" />
           </button>
         </div>
         <div class="composer">
@@ -3569,14 +3673,21 @@ onBeforeUnmount(() => {
 
 /* ─── Top bar ─────────────────────────────────────────────────────────── */
 .topbar {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 1.5rem;
-  padding: 0.85rem 1.5rem;
+  padding: 0.95rem 1.5rem;
   background: var(--bg-1);
   border-bottom: 1px solid var(--line-soft);
   box-shadow: var(--shadow-1);
-  min-height: 56px;
+  min-height: 64px;
+  overflow: hidden;
+}
+/* Children sit above the decorative mesh-bg via stacking context. */
+.topbar > *:not(.topbar-mesh-bg) {
+  position: relative;
+  z-index: 1;
 }
 .brand-block {
   display: flex;
@@ -4005,13 +4116,20 @@ onBeforeUnmount(() => {
 .unlock-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(4, 6, 10, 0.75);
+  background: rgba(4, 6, 10, 0.92);
   backdrop-filter: blur(10px);
   display: grid;
   place-items: center;
   z-index: 1000;
+  overflow: hidden;
 }
+
+/* Mesh-bg styles live in ui/src/style.css — Vue's scoped styling
+ * doesn't apply the data attribute to inline SVG children
+ * (<line>/<circle> stayed unstyled), so we host them globally. */
 .unlock-card {
+  position: relative;
+  z-index: 2;
   background: var(--bg-1);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
