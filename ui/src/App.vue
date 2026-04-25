@@ -13,6 +13,19 @@ import Icon from "./Icon.vue";
 // on the WebKit webview Tauri uses on Linux ("image/svg+xml is not a
 // valid JavaScript MIME type").
 const logoUrl = "/logo.svg";
+// Injected by Vite from package.json (see vite.config.js `define`).
+// Falls back to a hardcoded value so the pill always shows even if
+// the build-time substitution didn't happen for some reason
+// (e.g. running an old vite dev server that hasn't picked up the
+// new config yet).
+let appVersion = "0.3.0";
+try {
+  if (typeof __APP_VERSION__ !== "undefined" && __APP_VERSION__) {
+    appVersion = __APP_VERSION__;
+  }
+} catch (_e) {
+  // ReferenceError when the literal wasn't substituted — keep fallback.
+}
 
 const ports = ref([]);
 const selectedPort = ref("");
@@ -1929,51 +1942,92 @@ onBeforeUnmount(() => {
         aria-hidden="true"
       >
         <g class="mesh-edges">
-          <line x1="120" y1="140" x2="320" y2="90" />
-          <line x1="320" y1="90" x2="540" y2="170" />
-          <line x1="540" y1="170" x2="770" y2="110" />
-          <line x1="120" y1="140" x2="200" y2="320" />
-          <line x1="320" y1="90" x2="440" y2="280" />
-          <line x1="540" y1="170" x2="440" y2="280" />
-          <line x1="770" y1="110" x2="680" y2="330" />
-          <line x1="200" y1="320" x2="440" y2="280" />
-          <line x1="440" y1="280" x2="680" y2="330" />
-          <line x1="680" y1="330" x2="900" y2="280" />
-          <line x1="200" y1="320" x2="140" y2="510" />
-          <line x1="440" y1="280" x2="380" y2="540" />
-          <line x1="680" y1="330" x2="620" y2="480" />
-          <line x1="900" y1="280" x2="860" y2="520" />
-          <line x1="140" y1="510" x2="380" y2="540" />
-          <line x1="380" y1="540" x2="620" y2="480" />
-          <line x1="620" y1="480" x2="860" y2="520" />
+          <!-- row A horizontals (top) -->
+          <line x1="140" y1="90"  x2="340" y2="80" />
+          <line x1="340" y1="80"  x2="540" y2="110" />
+          <line x1="540" y1="110" x2="740" y2="80" />
+          <line x1="740" y1="80"  x2="920" y2="100" />
+          <!-- row B horizontals (upper-mid) -->
+          <line x1="90"  y1="210" x2="270" y2="180" />
+          <line x1="270" y1="180" x2="470" y2="220" />
+          <line x1="470" y1="220" x2="650" y2="200" />
+          <line x1="650" y1="200" x2="840" y2="220" />
+          <!-- row C horizontals (lower-mid) -->
+          <line x1="180" y1="360" x2="360" y2="380" />
+          <line x1="360" y1="380" x2="520" y2="360" />
+          <line x1="520" y1="360" x2="700" y2="400" />
+          <line x1="700" y1="400" x2="880" y2="360" />
+          <!-- row D horizontals (bottom) -->
+          <line x1="110" y1="510" x2="300" y2="520" />
+          <line x1="300" y1="520" x2="490" y2="490" />
+          <line x1="490" y1="490" x2="660" y2="540" />
+          <line x1="660" y1="540" x2="860" y2="500" />
+          <!-- A → B diagonals -->
+          <line x1="140" y1="90"  x2="90"  y2="210" />
+          <line x1="340" y1="80"  x2="270" y2="180" />
+          <line x1="540" y1="110" x2="470" y2="220" />
+          <line x1="740" y1="80"  x2="650" y2="200" />
+          <line x1="920" y1="100" x2="840" y2="220" />
+          <!-- B → C diagonals -->
+          <line x1="90"  y1="210" x2="180" y2="360" />
+          <line x1="270" y1="180" x2="360" y2="380" />
+          <line x1="470" y1="220" x2="520" y2="360" />
+          <line x1="650" y1="200" x2="700" y2="400" />
+          <line x1="840" y1="220" x2="880" y2="360" />
+          <!-- C → D diagonals -->
+          <line x1="180" y1="360" x2="110" y2="510" />
+          <line x1="360" y1="380" x2="300" y2="520" />
+          <line x1="520" y1="360" x2="490" y2="490" />
+          <line x1="700" y1="400" x2="660" y2="540" />
+          <line x1="880" y1="360" x2="860" y2="500" />
+          <!-- a few cross-band ties for organic look -->
+          <line x1="340" y1="80"  x2="470" y2="220" />
+          <line x1="650" y1="200" x2="520" y2="360" />
+          <line x1="360" y1="380" x2="490" y2="490" />
         </g>
         <g class="mesh-node-rings">
-          <circle cx="120" cy="140" r="3" />
-          <circle cx="320" cy="90" r="3" />
-          <circle cx="540" cy="170" r="3" />
-          <circle cx="770" cy="110" r="3" />
-          <circle cx="200" cy="320" r="3" />
-          <circle cx="440" cy="280" r="3" />
-          <circle cx="680" cy="330" r="3" />
-          <circle cx="900" cy="280" r="3" />
-          <circle cx="140" cy="510" r="3" />
-          <circle cx="380" cy="540" r="3" />
-          <circle cx="620" cy="480" r="3" />
-          <circle cx="860" cy="520" r="3" />
+          <circle cx="140" cy="90"  r="3" />
+          <circle cx="340" cy="80"  r="3" />
+          <circle cx="540" cy="110" r="3" />
+          <circle cx="740" cy="80"  r="3" />
+          <circle cx="920" cy="100" r="3" />
+          <circle cx="90"  cy="210" r="3" />
+          <circle cx="270" cy="180" r="3" />
+          <circle cx="470" cy="220" r="3" />
+          <circle cx="650" cy="200" r="3" />
+          <circle cx="840" cy="220" r="3" />
+          <circle cx="180" cy="360" r="3" />
+          <circle cx="360" cy="380" r="3" />
+          <circle cx="520" cy="360" r="3" />
+          <circle cx="700" cy="400" r="3" />
+          <circle cx="880" cy="360" r="3" />
+          <circle cx="110" cy="510" r="3" />
+          <circle cx="300" cy="520" r="3" />
+          <circle cx="490" cy="490" r="3" />
+          <circle cx="660" cy="540" r="3" />
+          <circle cx="860" cy="500" r="3" />
         </g>
         <g class="mesh-nodes">
-          <circle cx="120" cy="140" r="3" />
-          <circle cx="320" cy="90" r="3" />
-          <circle cx="540" cy="170" r="3" />
-          <circle cx="770" cy="110" r="3" />
-          <circle cx="200" cy="320" r="3" />
-          <circle cx="440" cy="280" r="3" />
-          <circle cx="680" cy="330" r="3" />
-          <circle cx="900" cy="280" r="3" />
-          <circle cx="140" cy="510" r="3" />
-          <circle cx="380" cy="540" r="3" />
-          <circle cx="620" cy="480" r="3" />
-          <circle cx="860" cy="520" r="3" />
+          <circle cx="140" cy="90"  r="3" />
+          <circle cx="340" cy="80"  r="3" />
+          <circle cx="540" cy="110" r="3" />
+          <circle cx="740" cy="80"  r="3" />
+          <circle cx="920" cy="100" r="3" />
+          <circle cx="90"  cy="210" r="3" />
+          <circle cx="270" cy="180" r="3" />
+          <circle cx="470" cy="220" r="3" />
+          <circle cx="650" cy="200" r="3" />
+          <circle cx="840" cy="220" r="3" />
+          <circle cx="180" cy="360" r="3" />
+          <circle cx="360" cy="380" r="3" />
+          <circle cx="520" cy="360" r="3" />
+          <circle cx="700" cy="400" r="3" />
+          <circle cx="880" cy="360" r="3" />
+          <circle cx="110" cy="510" r="3" />
+          <circle cx="300" cy="520" r="3" />
+          <circle cx="490" cy="490" r="3" />
+          <circle cx="660" cy="540" r="3" />
+          <circle cx="860" cy="500" r="3" />
         </g>
       </svg>
       <form class="unlock-card" @submit.prevent="submitUnlock">
@@ -3050,7 +3104,10 @@ onBeforeUnmount(() => {
       </svg>
       <div class="brand-block">
         <img :src="logoUrl" alt="" class="brand-logo" />
-        <span class="brand-label">mesh-chat</span>
+        <div class="brand-text">
+          <span class="brand-label">mesh-chat</span>
+          <span class="brand-version">v{{ appVersion }}</span>
+        </div>
       </div>
       <div class="id-block">
         <span class="id-label">you</span>
@@ -3699,10 +3756,24 @@ onBeforeUnmount(() => {
   height: 32px;
   filter: drop-shadow(0 0 10px rgba(255, 210, 58, 0.35));
 }
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1;
+  gap: 2px;
+}
 .brand-label {
   font-weight: 800;
   letter-spacing: 0.04em;
   font-size: 1rem;
+}
+.brand-version {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.05em;
 }
 .id-block {
   display: inline-flex;
@@ -4944,27 +5015,44 @@ onBeforeUnmount(() => {
   border: none;
 }
 
-/* Message action buttons (forward, etc.) */
+/* Message action buttons (reply / forward) sit in the bubble meta row.
+ * Pill background + accent border so they read as actionable controls
+ * on a dark bubble — the previous "ghost button at 55% opacity" look
+ * blended into the bubble background and people kept missing them. */
 .msg-forward {
-  background: transparent;
-  border: none;
-  color: var(--fg-dim);
-  font-size: 0.95rem;
-  padding: 0 0.25rem;
+  background: var(--accent-soft);
+  border: 1px solid rgba(255, 210, 58, 0.45);
+  color: var(--accent);
+  border-radius: 999px;
+  padding: 0;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
-  opacity: 0.55;
-  transition: opacity 120ms ease, color 120ms ease, transform 120ms ease;
+  margin-left: 4px;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    transform 120ms ease,
+    color 120ms ease;
 }
 .msg-forward:hover:not(:disabled) {
-  opacity: 1;
-  color: var(--accent);
-  transform: translateX(1px);
-  background: transparent;
-  border: none;
+  background: var(--accent);
+  color: #111;
+  border-color: var(--accent);
+  transform: translateY(-1px);
 }
 .msg-forward:disabled {
   cursor: not-allowed;
-  opacity: 0.3;
+  opacity: 0.4;
+}
+/* The pill button drives the icon color via currentColor — override
+ * Icon.vue's per-name accent classes with `:deep()` since their
+ * scoped data-attribute would otherwise win on specificity. */
+.msg-forward :deep(.icon) {
+  color: inherit;
 }
 
 /* Forward modal */
