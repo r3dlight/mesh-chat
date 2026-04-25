@@ -356,6 +356,32 @@ impl AppState {
             .as_deref()
             .map(|id| id == msg.from)
             .unwrap_or(false);
+        // Dedup: drop an incoming DM that mirrors our outgoing within
+        // the last 5 s. Some Meshcore firmware/repeater builds replay
+        // our outgoing as an incoming with sender = recipient, which
+        // doubles the bubble in the thread. Same heuristic as the GUI.
+        if !is_me {
+            if let Some(thread) = self.dm_threads.get(&peer) {
+                let looks_like_echo = thread.iter().rev().take(3).any(|prev| {
+                    let prev_is_me = self
+                        .my_id
+                        .as_deref()
+                        .map(|id| id == prev.from)
+                        .unwrap_or(false);
+                    prev_is_me
+                        && prev.text == msg.text
+                        && (prev.timestamp - msg.timestamp).abs() <= 5
+                });
+                if looks_like_echo {
+                    debug!(
+                        peer = %peer,
+                        text = %msg.text,
+                        "drop suspected firmware echo of our outgoing DM"
+                    );
+                    return;
+                }
+            }
+        }
         if let Some(h) = self.history.as_mut() {
             h.record(&msg);
         }
@@ -366,18 +392,38 @@ impl AppState {
     }
 
     /// Routes an incoming text message either into a regular channel bucket
-    /// or into a DM thread when the destination matches our node id.
+    /// or into a DM thread when it's addressed to or sent by us.
+    ///
+    /// Broadcast sentinels per protocol:
+    ///   - Meshcore channel sends: `to = "^all"`
+    ///   - Meshtastic channel sends: `to = "!ffffffff"` (broadcast node id)
+    /// Anything else in `to` refers to a specific peer → it's a DM, both
+    /// when we received it (`to == my_id`) and when we sent it
+    /// (`from == my_id`). Without this distinction, the local echo we
+    /// emit for an outgoing Meshcore DM was landing in the channel view
+    /// instead of the DM thread.
     fn route_incoming(&mut self, msg: ChatMessage) {
-        let is_dm = match self.my_id.as_deref() {
-            Some(id) => msg.to == id,
-            None => false,
-        };
-        if is_dm {
-            let peer = msg.from.clone();
-            self.push_dm(peer, msg);
-        } else {
+        let Some(my_id) = self.my_id.as_deref() else {
             self.push_message(msg);
+            return;
+        };
+        let is_broadcast = msg.to == "^all" || msg.to == "!ffffffff";
+        if is_broadcast {
+            self.push_message(msg);
+            return;
         }
+        // Pick the peer = whichever side of the conversation is NOT us.
+        let peer = if msg.from == my_id {
+            msg.to.clone()
+        } else if msg.to == my_id {
+            msg.from.clone()
+        } else {
+            // Neither end is us — fall back to the channel bucket so we
+            // don't silently drop the message.
+            self.push_message(msg);
+            return;
+        };
+        self.push_dm(peer, msg);
     }
 
     /// Switches the current space, resets scroll, clears unread for that
@@ -809,6 +855,22 @@ fn apply_mesh_event(state: &mut AppState, evt: MeshEvent) {
         MeshEvent::NodeSeen(info) => {
             state.nodes.insert(info.id.clone(), info);
         }
+        MeshEvent::NodeRemoved { id, .. } => {
+            state.nodes.remove(&id);
+        }
+        MeshEvent::RepeaterLoginResult {
+            peer, ok, error, ..
+        } => {
+            state.status = if ok {
+                format!("repeater {} authenticated", peer)
+            } else {
+                format!(
+                    "repeater {} login failed: {}",
+                    peer,
+                    error.as_deref().unwrap_or("unknown")
+                )
+            };
+        }
         MeshEvent::ChannelInfo(info) => {
             let idx = info.index as usize;
             let matches_pending = state.pending_channel_write == Some(info.index);
@@ -1110,6 +1172,7 @@ async fn handle_key_user_edit(
                             snr: None,
                             last_heard: None,
                             hops_away: None,
+                            kind: None,
                         });
                 }
                 state.user_editor = None;

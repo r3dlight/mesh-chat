@@ -307,6 +307,38 @@ impl MeshBackend for MeshtasticBackend {
                                     "Meshtastic auto-refreshes node list from incoming packets — no explicit refresh possible".into(),
                                 ).await;
                             }
+                            MeshCommand::SendAdvert { .. } => {
+                                // Meshtastic firmware auto-broadcasts NodeInfo
+                                // on its own schedule (every few minutes); no
+                                // manual trigger is exposed in the protobuf
+                                // API. Meshcore-specific feature.
+                                send_err(
+                                    &event_tx,
+                                    "Send Advert is Meshcore-only — Meshtastic rebroadcasts NodeInfo automatically on its own cadence".into(),
+                                ).await;
+                            }
+                            MeshCommand::ForgetNode { .. } => {
+                                // Meshtastic's NodeDB ages nodes out based on
+                                // lastHeard and max entries; the companion
+                                // protocol doesn't expose a per-node delete
+                                // primitive. Surface the limitation rather
+                                // than silently succeeding.
+                                send_err(
+                                    &event_tx,
+                                    "Forget node is Meshcore-only — Meshtastic's NodeDB ages out stale entries automatically".into(),
+                                ).await;
+                            }
+                            MeshCommand::RepeaterLogin { .. } | MeshCommand::RepeaterLogout { .. } => {
+                                // Meshtastic uses AdminMessage with session
+                                // passkeys for admin operations, gated by the
+                                // device's admin key — a different model that
+                                // doesn't map onto the password-based session
+                                // login Meshcore exposes. Surface the gap.
+                                send_err(
+                                    &event_tx,
+                                    "Repeater login is Meshcore-only — Meshtastic admin operations use AdminMessage + admin keys, not password sessions".into(),
+                                ).await;
+                            }
                             MeshCommand::Shutdown => {
                                 info!(network = Network::Meshtastic.as_str(), "shutdown requested");
                                 if let Some(api) = stream_api.take() {
@@ -1210,6 +1242,11 @@ async fn handle_packet(
                         snr,
                         last_heard,
                         hops_away: node.hops_away,
+                        // Meshtastic has a `role` proto enum for admin
+                        // routing but doesn't distinguish chat vs repeater
+                        // at the NodeInfo layer like Meshcore does, so we
+                        // leave this None — the UI won't gate Start DM.
+                        kind: None,
                     }),
                 )
                 .await;

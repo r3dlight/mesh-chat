@@ -106,6 +106,36 @@ pub struct NodeInfo {
     /// Number of mesh hops between us and this node.
     #[serde(default)]
     pub hops_away: Option<u32>,
+    /// What kind of device this is — chat peer, repeater, or room server.
+    /// Relevant only on Meshcore (Meshtastic doesn't tag nodes this way).
+    /// The UI uses this to gate Start DM: repeaters interpret plain text
+    /// messages as admin commands and will reply "unknown command" to
+    /// anything they don't recognise, so a normal chat flow is wrong.
+    #[serde(default)]
+    pub kind: Option<NodeKind>,
+}
+
+/// High-level classification of a Meshcore contact. Mirrors the firmware's
+/// `contact_type` byte: 1 = Chat, 2 = Repeater, 3 = Room server. Anything
+/// else lands in `Other` rather than being discarded so new firmware
+/// contact types don't silently disappear from the sidebar.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum NodeKind {
+    Chat,
+    Repeater,
+    RoomServer,
+    Other,
+}
+
+impl NodeKind {
+    pub fn from_meshcore_byte(b: u8) -> Self {
+        match b {
+            1 => Self::Chat,
+            2 => Self::Repeater,
+            3 => Self::RoomServer,
+            _ => Self::Other,
+        }
+    }
 }
 
 /// Role of a Meshtastic channel.
@@ -219,6 +249,25 @@ pub enum MeshEvent {
     },
     TextMessage(ChatMessage),
     NodeSeen(NodeInfo),
+    /// A node was removed from the backend's local contact cache,
+    /// typically in response to `MeshCommand::ForgetNode`. The UI
+    /// should drop it from the sidebar and any open DM thread.
+    NodeRemoved {
+        network: Network,
+        id: String,
+    },
+    /// Outcome of a `RepeaterLogin` attempt. `peer` is the same id the
+    /// command was issued with (the underlying `LoginSuccess` /
+    /// `LoginFailed` packets carry no peer prefix on the Meshcore wire,
+    /// so the backend correlates by tracking the pending login).
+    RepeaterLoginResult {
+        network: Network,
+        peer: String,
+        ok: bool,
+        /// Filled when the firmware reported a structured failure
+        /// reason or when correlation timed out.
+        error: Option<String>,
+    },
     ChannelInfo(ChannelInfo),
     LoraInfo(LoraInfo),
     DeviceRoleInfo(DeviceRoleInfo),
@@ -417,6 +466,41 @@ pub enum MeshCommand {
         local_id: u64,
         latitude: f64,
         longitude: f64,
+    },
+    /// Re-broadcast our own full-identity advertisement so neighbouring
+    /// nodes cache our pubkey. Meshcore DMs silently drop when the remote
+    /// doesn't have our full pubkey, so this is the fix-it-yourself lever
+    /// when a peer can't receive our messages. Meshtastic auto-advertises
+    /// periodically and exposes no manual trigger — the backend rejects
+    /// the command with an Error event there.
+    SendAdvert {
+        /// `true` = flood (far reach, more airtime); `false` = zero-hop
+        /// (immediate neighbours only).
+        flood: bool,
+    },
+    /// Remove a node from the radio's local contact cache. On Meshcore
+    /// this sends `CMD_REMOVE_CONTACT`; Meshtastic rejects with an Error
+    /// event since its NodeDB is not directly user-editable from the
+    /// companion protocol (the firmware ages out stale nodes on its own).
+    ForgetNode {
+        /// 12-char hex pubkey prefix of the node to forget.
+        id: String,
+    },
+    /// Authenticate against a Meshcore repeater or room server.
+    /// Subsequent text messages to that peer will be treated as admin
+    /// commands the firmware lets you execute (e.g. `set`, `reboot`,
+    /// `permit`/`remove`). The session lives ~10–15 min on the remote
+    /// before requiring re-auth. Meshtastic doesn't expose anything
+    /// equivalent; the backend rejects with an Error event there.
+    RepeaterLogin {
+        /// 12-char hex pubkey prefix of the repeater.
+        peer: String,
+        /// Admin password configured on the repeater.
+        password: String,
+    },
+    /// Tear down an active admin session with a repeater.
+    RepeaterLogout {
+        peer: String,
     },
     Shutdown,
 }

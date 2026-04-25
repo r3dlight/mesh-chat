@@ -60,6 +60,15 @@ const channels = ref({}); // index -> ChannelInfo
 const nodes = ref({}); // node_id -> NodeInfo (for long-name lookup)
 const dmThreads = ref({}); // peer_id -> ChatMessage[]
 const dmUnread = ref({}); // peer_id -> unread count
+// Per-repeater login state. `loggedInAt[peer]` = unix-ms of last
+// successful auth; the session expires ~10–15 min later on firmware,
+// so we surface a "stale" warning past 12 minutes.
+const loggedInAt = ref({});
+const loginPending = ref(null); // peer id of in-flight login
+// Last failure message per peer so the admin-bar keeps the error
+// visible even after the global status text scrolls past. Cleared the
+// next time the user clicks Login on that peer.
+const loginError = ref({});
 const currentSpace = ref({ kind: "channel", idx: 0 }); // { kind: "channel", idx } | { kind: "dm", peer }
 const messagesEl = ref(null);
 const historyInfo = ref({
@@ -438,12 +447,35 @@ const needsUnlock = computed(
 );
 const needsSetup = computed(() => historyState.value?.needs_setup);
 
-let unlistenMesh = null;
+// Stored on globalThis so it survives Vite HMR. After a hot reload the
+// new module instance gets a fresh `let unlistenMesh = null` which made
+// us register *another* Tauri listener on top of the previous one, and
+// each backend event fired the handler N times — producing the
+// "command typed once, two bubbles" symptom in dev mode. Routing the
+// pointer through globalThis lets us tear down the previous listener
+// even when the JS module that registered it has been replaced.
+const HMR_LISTENER_KEY = "__meshChatUnlistenMesh";
 
 // ─── Derived state ───────────────────────────────────────────────────────
 
 const isChannelSpace = computed(() => currentSpace.value.kind === "channel");
 const isDmSpace = computed(() => currentSpace.value.kind === "dm");
+
+const currentPeerKind = computed(() => {
+  if (!isDmSpace.value) return null;
+  return nodes.value[currentSpace.value.peer]?.kind || null;
+});
+
+const composerPlaceholder = computed(() => {
+  if (!connected.value) return "Connect first…";
+  if (currentPeerKind.value === "Repeater") {
+    return "Admin command (status, ver, reboot…)";
+  }
+  if (currentPeerKind.value === "RoomServer") {
+    return "Admin command (help, status…)";
+  }
+  return "Type a message…";
+});
 
 const filteredMessages = computed(() => {
   const base = isChannelSpace.value
@@ -574,12 +606,20 @@ function isFavorite(id) {
   return !!favorites.value[id];
 }
 
+// Broadcast sentinels per protocol:
+//   Meshcore channel sends: `to = "^all"`
+//   Meshtastic channel sends: `to = "!ffffffff"` (the 0xFFFFFFFF node-id)
+// Anything else in `to` refers to a specific peer → it's a DM.
+function isBroadcastAddress(to) {
+  return to === "^all" || to === "!ffffffff";
+}
+
 function isDirectMessage(m) {
-  // A received DM has `to` matching our own id; an outgoing echo has `to`
-  // equal to the peer's node id (not "^all" and not broadcast).
   if (!myId.value) return false;
-  if (m.to === "^all") return false;
-  return m.to === myId.value || (m.from === myId.value && m.to.startsWith("!"));
+  if (!m.to || isBroadcastAddress(m.to)) return false;
+  if (m.to === myId.value) return true; // DM received by us
+  if (m.from === myId.value) return true; // DM we sent
+  return false;
 }
 
 function dmPeerOf(m) {
@@ -930,11 +970,115 @@ function signalBars(snr) {
   return "░░░░░";
 }
 
+async function repeaterLogin(peerId) {
+  if (loginPending.value) {
+    status.value = `login: another request to ${loginPending.value} is already in flight`;
+    return;
+  }
+  const n = nodes.value[peerId];
+  const label = n?.long_name?.trim() || peerId;
+  // Browser prompt is intentionally low-tech here — admin passwords are
+  // not high-frequency input and a custom modal would carry more state.
+  // Browsers don't expose a password-masked prompt, so warn the user.
+  const password = window.prompt(
+    `Admin password for "${label}":\n\n` +
+      `Note: input is shown in clear (no native masked prompt). The password is sent encrypted on the air.`
+  );
+  if (password === null) return;
+  if (password === "") {
+    status.value = "login: empty password not accepted";
+    return;
+  }
+  loginPending.value = peerId;
+  // Clear the previous failure note so the admin-bar shows just the
+  // pending state. If this attempt fails, the new error replaces it.
+  if (loginError.value[peerId]) {
+    const next = { ...loginError.value };
+    delete next[peerId];
+    loginError.value = next;
+  }
+  status.value = `login: requesting auth on ${label}…`;
+  try {
+    await invoke("repeater_login", { peer: peerId, password });
+  } catch (e) {
+    loginPending.value = null;
+    loginError.value = { ...loginError.value, [peerId]: String(e) };
+    status.value = `login error: ${e}`;
+  }
+}
+
+async function repeaterLogout(peerId) {
+  try {
+    await invoke("repeater_logout", { peer: peerId });
+  } catch (e) {
+    status.value = `logout error: ${e}`;
+  }
+}
+
+function loginAgeMinutes(peerId) {
+  const ts = loggedInAt.value[peerId];
+  if (!ts) return null;
+  return (Date.now() - ts) / 60_000;
+}
+
+function isLoggedIn(peerId) {
+  const age = loginAgeMinutes(peerId);
+  return age != null && age < 12; // firmware session ≈ 10–15 min, conservative
+}
+
+async function forgetNode(id) {
+  const n = nodes.value[id];
+  const label = n?.long_name?.trim() || id;
+  const ok = window.confirm(
+    `Forget "${label}" (${id})?\n\nThis removes it from the radio's contact cache. The node will only reappear if it advertises again. Aliases and DM history stay untouched.`
+  );
+  if (!ok) return;
+  try {
+    await invoke("forget_node", { id });
+    status.value = `forget: requested removal of ${label}`;
+  } catch (e) {
+    status.value = `forget error: ${e}`;
+  }
+}
+
+const advertingSelf = ref(false);
+async function sendAdvertSelf(flood = true) {
+  if (advertingSelf.value) return;
+  advertingSelf.value = true;
+  status.value = flood
+    ? "broadcasting advert (flood)…"
+    : "broadcasting advert (zero-hop)…";
+  try {
+    await invoke("send_advert", { flood });
+    status.value = flood
+      ? "advert broadcast — neighbours should cache our identity within ~10s"
+      : "advert broadcast — immediate neighbours only";
+  } catch (e) {
+    status.value = `advert error: ${e}`;
+  } finally {
+    advertingSelf.value = false;
+  }
+}
+
+const refreshingNodes = ref(false);
 async function refreshNodes() {
+  if (refreshingNodes.value) return;
+  refreshingNodes.value = true;
+  const before = Object.keys(nodes.value).length;
+  status.value = "refreshing nodes…";
   try {
     await invoke("refresh_nodes");
+    await new Promise((r) => setTimeout(r, 400));
+    const after = Object.keys(nodes.value).length;
+    const delta = after - before;
+    status.value =
+      delta > 0
+        ? `nodes refreshed · +${delta} new (${after} total)`
+        : `nodes refreshed · ${after} known`;
   } catch (e) {
     status.value = `refresh error: ${e}`;
+  } finally {
+    refreshingNodes.value = false;
   }
 }
 
@@ -1122,7 +1266,21 @@ async function toggleFavorite(nodeId) {
 
 function startDmWithNode(nodeId) {
   if (!nodeId || nodeId === myId.value) return;
-  // Make sure the thread exists so the sidebar shows it.
+  const n = nodes.value[nodeId];
+  // Meshcore repeaters and room servers interpret plain text messages
+  // as admin commands ("status", "reboot", …) and reply "unknown
+  // command" to normal chat. Warn before opening a thread that won't
+  // behave like a peer conversation.
+  if (n?.kind === "Repeater" || n?.kind === "RoomServer") {
+    const role = n.kind === "Repeater" ? "repeater" : "room server";
+    const ok = window.confirm(
+      `"${n.long_name || nodeId}" is a Meshcore ${role}, not a chat peer.\n\n` +
+        `Messages you send will be treated as admin commands (e.g. "status", "ver", "help"). ` +
+        `Plain chat replies will come back as "unknown command".\n\n` +
+        `Open a command thread anyway?`
+    );
+    if (!ok) return;
+  }
   if (!dmThreads.value[nodeId]) {
     dmThreads.value = { ...dmThreads.value, [nodeId]: [] };
   }
@@ -1332,6 +1490,19 @@ function fmtTime(ts) {
 // ─── Event handling ──────────────────────────────────────────────────────
 
 function handleMeshEvent(evt) {
+  if (evt.TextMessage) {
+    console.log(
+      "[mesh-chat] HANDLE TextMessage",
+      "text=",
+      JSON.stringify(evt.TextMessage.text),
+      "from=",
+      evt.TextMessage.from,
+      "to=",
+      evt.TextMessage.to,
+      "local_id=",
+      evt.TextMessage.local_id,
+    );
+  }
   if (evt.Connected) {
     myId.value = evt.Connected.my_id;
     // Backend type comes through here — lets the UI gate protocol-specific
@@ -1387,6 +1558,47 @@ function handleMeshEvent(evt) {
     if (isDirectMessage(msg)) {
       const peer = dmPeerOf(msg);
       const arr = dmThreads.value[peer] || [];
+      // Dedup: drop an *incoming* DM if its text exactly matches what
+      // we sent on this thread within the last 5 s. Some Meshcore
+      // firmwares (and some repeater builds) replay outgoing messages
+      // back to the companion as ContactMsgRecv with sender_prefix =
+      // the recipient, which makes the user's own command appear
+      // twice in the thread (once as our local echo, once as a "from
+      // repeater" message containing the same text). We can't tell
+      // these synthetic echoes apart from a real repeater that
+      // genuinely chose to repeat the user's command, but the
+      // collision window is tight enough that the false-positive risk
+      // is acceptable.
+      if (!msg.isMe && arr.length > 0) {
+        const nowSec = msg.timestamp || Math.floor(Date.now() / 1000);
+        const looksLikeEcho = arr
+          .slice(-5)
+          .some(
+            (prev) =>
+              prev.isMe &&
+              prev.text === msg.text &&
+              Math.abs((prev.timestamp || 0) - nowSec) <= 30
+          );
+        if (looksLikeEcho) {
+          console.debug(
+            "drop suspected firmware echo of our outgoing DM",
+            { peer, text: msg.text, sender: m.from, to: m.to }
+          );
+          return;
+        }
+      }
+      console.log(
+        "[mesh-chat] PUSH dm",
+        peer,
+        "text=",
+        JSON.stringify(msg.text),
+        "isMe=",
+        msg.isMe,
+        "local_id=",
+        msg.localId,
+        "thread_len_before=",
+        arr.length,
+      );
       dmThreads.value = { ...dmThreads.value, [peer]: [...arr, msg] };
       const viewing =
         isDmSpace.value && currentSpace.value.peer === peer;
@@ -1422,6 +1634,59 @@ function handleMeshEvent(evt) {
       merged.last_heard = Math.floor(Date.now() / 1000);
     }
     nodes.value = { ...nodes.value, [n.id]: merged };
+  } else if (evt.RepeaterLoginResult) {
+    const { peer, ok, error } = evt.RepeaterLoginResult;
+    loginPending.value = null;
+    const n = nodes.value[peer];
+    const label = n?.long_name?.trim() || peer;
+    if (ok) {
+      loggedInAt.value = { ...loggedInAt.value, [peer]: Date.now() };
+      // Clear any stale error from a previous failed attempt.
+      if (loginError.value[peer]) {
+        const next = { ...loginError.value };
+        delete next[peer];
+        loginError.value = next;
+      }
+      status.value = `🔓 authenticated on ${label}`;
+    } else {
+      // Logout/failure both clear the login state — same UX whether the
+      // password was wrong or the user explicitly logged out.
+      const next = { ...loggedInAt.value };
+      delete next[peer];
+      loggedInAt.value = next;
+      const msg = error || "login failed";
+      // "logged out" comes from an explicit user action, not a failure;
+      // don't surface it as an error in the admin-bar.
+      if (msg !== "logged out") {
+        loginError.value = { ...loginError.value, [peer]: msg };
+      }
+      status.value = `🔒 ${label}: ${msg}`;
+    }
+  } else if (evt.NodeRemoved) {
+    const { id } = evt.NodeRemoved;
+    // Drop from sidebar, close any open DM on that peer, clean unread
+    // counts and alias-edit state so the forget action is fully reversed
+    // locally. Aliases in aliases.json stay — the user may re-add the
+    // node later and will expect their chosen name to come back.
+    if (nodes.value[id]) {
+      const next = { ...nodes.value };
+      delete next[id];
+      nodes.value = next;
+    }
+    if (dmThreads.value[id]) {
+      const next = { ...dmThreads.value };
+      delete next[id];
+      dmThreads.value = next;
+    }
+    if (dmUnread.value[id]) {
+      const next = { ...dmUnread.value };
+      delete next[id];
+      dmUnread.value = next;
+    }
+    if (isDmSpace.value && currentSpace.value.peer === id) {
+      currentSpace.value = { kind: "channel", idx: 0 };
+    }
+    status.value = `node forgotten: ${id}`;
   } else if (evt.ChannelInfo) {
     const c = evt.ChannelInfo;
     channels.value = { ...channels.value, [c.index]: c };
@@ -1588,7 +1853,21 @@ onMounted(async () => {
   // Each of these can fail independently (e.g. listen() throws if the
   // Tauri bridge isn't ready yet) — don't let one blow up the others.
   try {
-    unlistenMesh = await listen("mesh-event", (e) => handleMeshEvent(e.payload));
+    // Tear down any stale listener before registering ours. Survives
+    // Vite HMR via globalThis — see HMR_LISTENER_KEY comment.
+    const stale = globalThis[HMR_LISTENER_KEY];
+    if (typeof stale === "function") {
+      try {
+        stale();
+      } catch (cleanupErr) {
+        console.warn("stale mesh-event listener threw on cleanup:", cleanupErr);
+      }
+      globalThis[HMR_LISTENER_KEY] = null;
+    }
+    const unlisten = await listen("mesh-event", (e) =>
+      handleMeshEvent(e.payload),
+    );
+    globalThis[HMR_LISTENER_KEY] = unlisten;
   } catch (e) {
     console.error("listen mesh-event failed:", e);
   }
@@ -1608,7 +1887,15 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
-  if (unlistenMesh) unlistenMesh();
+  const fn = globalThis[HMR_LISTENER_KEY];
+  if (typeof fn === "function") {
+    try {
+      fn();
+    } catch (e) {
+      console.warn("unlisten mesh-event threw:", e);
+    }
+    globalThis[HMR_LISTENER_KEY] = null;
+  }
   window.removeEventListener("keydown", handleGlobalKey);
 });
 </script>
@@ -2461,20 +2748,31 @@ onBeforeUnmount(() => {
       class="panel-overlay"
       @click.self="openPanel = null"
     >
-      <div class="panel-card panel-card-lg">
+      <div class="panel-card panel-card-xl">
         <div class="panel-head">
           <h3>⧉ Nodes ({{ sortedNodes.length }})</h3>
           <div class="panel-head-actions">
             <button
               type="button"
               class="panel-head-btn"
-              :disabled="!connected || currentNetwork !== 'meshcore'"
+              :disabled="!connected || currentNetwork !== 'meshcore' || advertingSelf"
+              title="Rebroadcast our full identity (pubkey + name + position) so neighbours cache us. Required for DMs to work — a remote that has never heard our advert will silently drop our messages."
+              @click="sendAdvertSelf(true)"
+            >
+              <span v-if="advertingSelf">⏳ Advertising…</span>
+              <span v-else>📣 Send Advert</span>
+            </button>
+            <button
+              type="button"
+              class="panel-head-btn"
+              :disabled="!connected || currentNetwork !== 'meshcore' || refreshingNodes"
               :title="currentNetwork === 'meshcore'
                 ? 'Re-query the firmware contact cache (Meshcore only)'
                 : 'Meshtastic auto-refreshes from incoming packets — nothing to pull manually'"
               @click="refreshNodes"
             >
-              🔄 Refresh
+              <span v-if="refreshingNodes">⏳ Refreshing…</span>
+              <span v-else>🔄 Refresh</span>
             </button>
             <button type="button" class="panel-x" @click="openPanel = null">
               ✕
@@ -2500,6 +2798,17 @@ onBeforeUnmount(() => {
           its identity (<em>Send advert</em> in the official Meshcore
           client, or reboot the remote), or type a memorable name in
           the <strong>alias</strong> column below.
+        </p>
+        <p
+          v-if="currentNetwork === 'meshcore'"
+          class="panel-hint"
+          style="color: var(--info)"
+        >
+          💡 <strong>Remote can't receive your DMs?</strong> Meshcore
+          silently drops messages from unknown senders. Click
+          <strong>📣 Send Advert</strong> above to broadcast your
+          identity so the remote caches your pubkey, then retry the
+          DM after ~10&nbsp;s.
         </p>
         <table class="nodes-table">
           <thead>
@@ -2542,6 +2851,16 @@ onBeforeUnmount(() => {
                   …{{ (n.id || "").slice(-4) }}
                 </span>
                 <span class="short">{{ n.short_name ? `(${n.short_name})` : "" }}</span>
+                <span
+                  v-if="n.kind === 'Repeater'"
+                  class="kind-tag kind-repeater"
+                  title="Meshcore repeater — responds to admin commands (status, reboot, …), not chat"
+                >📡 repeater</span>
+                <span
+                  v-else-if="n.kind === 'RoomServer'"
+                  class="kind-tag kind-room"
+                  title="Meshcore room server — responds to admin commands, not chat"
+                >🏠 room</span>
               </td>
               <td>
                 <input
@@ -2585,14 +2904,35 @@ onBeforeUnmount(() => {
                 </a>
                 <span v-else>—</span>
               </td>
-              <td>
+              <td class="actions-cell">
                 <button
                   v-if="n.id !== myId"
                   type="button"
                   class="btn-primary sm"
+                  :title="
+                    n.kind === 'Repeater'
+                      ? 'Open a command thread — this is a repeater, messages go as admin commands'
+                      : n.kind === 'RoomServer'
+                        ? 'Open a command thread — this is a room server, messages go as admin commands'
+                        : 'Open an encrypted DM thread with this peer'
+                  "
                   @click="startDmWithNode(n.id)"
                 >
-                  ✉ Start DM
+                  <template v-if="n.kind === 'Repeater' || n.kind === 'RoomServer'">
+                    ⚙ Command
+                  </template>
+                  <template v-else>
+                    ✉ Start DM
+                  </template>
+                </button>
+                <button
+                  v-if="n.id !== myId && currentNetwork === 'meshcore'"
+                  type="button"
+                  class="btn-ghost sm"
+                  title="Forget this node — removes it from the radio's contact cache"
+                  @click="forgetNode(n.id)"
+                >
+                  🗑
                 </button>
               </td>
             </tr>
@@ -2949,16 +3289,67 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <!-- Meshcore channel messages don't carry sender attribution
-             in the companion protocol (v2 and v3). Warn once here so
-             the user knows "anon · chN" isn't a bug. -->
+        <!-- Repeater / room-server admin login bar. Surfaces the login
+             state for the current DM peer when it's a Meshcore admin
+             device, plus a button to (re-)authenticate or log out. -->
         <div
-          v-if="currentNetwork === 'meshcore' && isChannelSpace"
-          class="channel-anon-note"
+          v-if="isDmSpace && (currentPeerKind === 'Repeater' || currentPeerKind === 'RoomServer')"
+          class="admin-bar"
+          :class="
+            isLoggedIn(currentSpace.peer)
+              ? 'admin-bar-on'
+              : loginError[currentSpace.peer]
+                ? 'admin-bar-err'
+                : 'admin-bar-off'
+          "
         >
-          ⓘ Meshcore channel messages are anonymous — the companion
-          protocol does not transmit who sent each message. Use DMs
-          if you need sender attribution.
+          <span class="admin-bar-icon">
+            {{
+              isLoggedIn(currentSpace.peer)
+                ? '🔓'
+                : loginError[currentSpace.peer]
+                  ? '⚠'
+                  : '🔒'
+            }}
+          </span>
+          <span class="admin-bar-text">
+            <template v-if="isLoggedIn(currentSpace.peer)">
+              Authenticated · session expires in
+              {{ Math.max(0, Math.round(12 - loginAgeMinutes(currentSpace.peer))) }} min
+            </template>
+            <template v-else-if="loginError[currentSpace.peer]">
+              Login failed — {{ loginError[currentSpace.peer] }}
+            </template>
+            <template v-else>
+              Read-only — only `ver`, `clock`, `status`, `help` are accepted
+              without login. Authenticate to send admin commands.
+            </template>
+          </span>
+          <div class="admin-bar-actions">
+            <button
+              v-if="!isLoggedIn(currentSpace.peer)"
+              type="button"
+              class="btn-primary sm"
+              :disabled="loginPending === currentSpace.peer"
+              @click="repeaterLogin(currentSpace.peer)"
+            >
+              {{
+                loginPending === currentSpace.peer
+                  ? '⏳ Authenticating…'
+                  : loginError[currentSpace.peer]
+                    ? '🔄 Retry'
+                    : '🔐 Login'
+              }}
+            </button>
+            <button
+              v-else
+              type="button"
+              class="btn-ghost sm"
+              @click="repeaterLogout(currentSpace.peer)"
+            >
+              🚪 Logout
+            </button>
+          </div>
         </div>
 
         <div v-if="searchVisible" class="search-bar">
@@ -3137,7 +3528,7 @@ onBeforeUnmount(() => {
             v-model="input"
             type="text"
             class="composer-input"
-            :placeholder="connected ? 'Type a message…' : 'Connect first…'"
+            :placeholder="composerPlaceholder"
             @keydown.enter="send"
             @keydown.esc="cancelReply"
             :disabled="!connected"
@@ -3490,30 +3881,29 @@ onBeforeUnmount(() => {
   justify-content: flex-end;
 }
 .bubble {
-  max-width: 82%;
-  min-width: 140px;
+  max-width: min(78%, 640px);
+  min-width: 0;
   background: var(--bg-2);
   border: 1px solid var(--line-soft);
-  border-radius: var(--radius-lg);
-  padding: 0.6rem 1rem;
-  box-shadow: var(--shadow-1);
+  border-radius: 14px;
+  padding: 0.55rem 0.85rem;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
   position: relative;
+  /* Enable text selection across the bubble — some webview defaults
+   * (notably WebKitGTK on Linux) ship with `user-select: none` baked
+   * into chat-style flex containers; force it on so the user can
+   * Ctrl+C a repeater response or a node id without faff. */
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
 }
 .msg.me .bubble {
-  background: linear-gradient(
-    145deg,
-    rgba(61, 220, 132, 0.16),
-    rgba(61, 220, 132, 0.05)
-  );
-  border-color: rgba(61, 220, 132, 0.25);
+  background: rgba(61, 220, 132, 0.1);
+  border-color: rgba(61, 220, 132, 0.22);
   border-top-right-radius: 4px;
 }
 .msg.them .bubble {
-  background: linear-gradient(
-    145deg,
-    rgba(88, 166, 255, 0.12),
-    rgba(88, 166, 255, 0.04)
-  );
+  background: rgba(88, 166, 255, 0.08);
   border-color: rgba(88, 166, 255, 0.2);
   border-top-left-radius: 4px;
 }
@@ -3521,10 +3911,10 @@ onBeforeUnmount(() => {
 .meta {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  font-size: 0.88rem;
+  gap: 0.35rem;
+  font-size: 0.72rem;
   color: var(--fg-dim);
-  margin-bottom: 0.3rem;
+  margin-bottom: 0.2rem;
 }
 .meta-from {
   font-weight: 600;
@@ -3563,8 +3953,9 @@ onBeforeUnmount(() => {
 .body-text {
   white-space: pre-wrap;
   word-wrap: break-word;
-  line-height: 1.55;
-  font-size: 1.15rem;
+  line-height: 1.5;
+  font-size: 0.95rem;
+  color: var(--fg);
 }
 
 /* enter transition */
@@ -3885,25 +4276,28 @@ onBeforeUnmount(() => {
   display: grid;
   place-items: center;
   z-index: 900;
-  padding: 2rem;
+  padding: 1rem;
 }
 .panel-card {
   background: var(--bg-1);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   padding: 1.25rem 1.5rem;
-  min-width: 380px;
-  max-width: 520px;
+  min-width: 0;
+  max-width: min(520px, 95vw);
   width: 100%;
   display: flex;
   flex-direction: column;
   gap: 0.7rem;
   box-shadow: var(--shadow-2);
-  max-height: 90vh;
+  max-height: 92vh;
   overflow-y: auto;
 }
 .panel-card-lg {
-  max-width: 760px;
+  max-width: min(760px, 95vw);
+}
+.panel-card-xl {
+  max-width: min(1280px, 97vw);
 }
 .panel-head {
   display: flex;
@@ -3983,14 +4377,20 @@ onBeforeUnmount(() => {
   font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  padding: 0.4rem 0.5rem;
+  padding: 0.4rem 0.4rem;
   border-bottom: 1px solid var(--line-soft);
+  white-space: nowrap;
 }
 .chan-table td,
 .nodes-table td {
-  padding: 0.4rem 0.5rem;
+  padding: 0.35rem 0.4rem;
   border-bottom: 1px solid var(--line-soft);
   vertical-align: middle;
+}
+.nodes-table td.actions-cell,
+.nodes-table th.actions-cell {
+  white-space: nowrap;
+  text-align: right;
 }
 .chan-table tr.disabled td {
   color: var(--fg-dim);
@@ -4059,6 +4459,22 @@ onBeforeUnmount(() => {
   padding: 0.25rem 0.55rem;
   font-size: 0.78rem;
 }
+.btn-ghost {
+  background: transparent;
+  border: 1px solid var(--line-soft);
+  color: var(--fg-muted);
+}
+.btn-ghost:hover:not(:disabled) {
+  background: var(--bg-2);
+  border-color: var(--danger);
+  color: var(--danger);
+  box-shadow: none;
+}
+.btn-ghost.sm {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.8rem;
+  margin-left: 0.35rem;
+}
 .chan-edit {
   border-top: 1px solid var(--line-soft);
   padding-top: 0.8rem;
@@ -4086,6 +4502,24 @@ onBeforeUnmount(() => {
   color: var(--fg-dim);
   font-size: 0.78rem;
   margin-left: 0.3rem;
+}
+.kind-tag {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.45rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  border-radius: 999px;
+  vertical-align: middle;
+}
+.kind-repeater {
+  background: var(--info-soft);
+  color: var(--info);
+}
+.kind-room {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 /* Shown in the name column when the firmware hasn't yet received a
  * full-identity advert for a peer. Keep the pubkey-suffix discreet so
@@ -4162,17 +4596,6 @@ onBeforeUnmount(() => {
   cursor: not-allowed;
 }
 
-/* Banner shown at the top of the chat area on a Meshcore channel
- * space so the user doesn't assume "anon · ch1" is a bug. */
-.channel-anon-note {
-  padding: 0.45rem 1.5rem;
-  background: rgba(255, 165, 60, 0.08);
-  border-bottom: 1px solid rgba(255, 165, 60, 0.25);
-  color: #ffb34a;
-  font-size: 0.8rem;
-  line-height: 1.4;
-}
-
 /* Inline position indicator on received bubbles */
 .position-pill {
   display: inline-block;
@@ -4198,6 +4621,39 @@ onBeforeUnmount(() => {
 }
 .position-link:hover {
   color: var(--accent);
+}
+
+/* Repeater / room-server admin login bar */
+.admin-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.55rem 1.5rem;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+.admin-bar-on {
+  background: rgba(74, 224, 138, 0.08);
+  color: var(--success);
+}
+.admin-bar-off {
+  background: rgba(255, 210, 58, 0.06);
+  color: var(--accent);
+}
+.admin-bar-err {
+  background: rgba(255, 101, 101, 0.08);
+  color: var(--danger);
+}
+.admin-bar-icon {
+  font-size: 1rem;
+}
+.admin-bar-text {
+  flex: 1;
+}
+.admin-bar-actions {
+  display: flex;
+  gap: 0.4rem;
 }
 
 /* In-space search bar (Ctrl+F) */
@@ -4446,6 +4902,7 @@ onBeforeUnmount(() => {
 }
 .alias-input {
   width: 100%;
+  min-width: 110px;
   font-size: 0.8rem;
   padding: 0.2rem 0.4rem;
   background: var(--bg-2);
@@ -4494,30 +4951,48 @@ onBeforeUnmount(() => {
 .composer {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  padding: 1rem 1.5rem;
+  gap: 0.55rem;
+  padding: 0.75rem 1.25rem;
   background: var(--bg-1);
   border-top: 1px solid var(--line-soft);
 }
 .composer-chan {
   font-family: var(--font-mono);
-  font-size: 0.85rem;
+  font-size: 0.78rem;
   font-weight: 600;
   color: var(--accent);
-  padding: 0.6rem 0.85rem;
+  padding: 0.55rem 0.7rem;
   background: var(--bg-2);
   border-radius: var(--radius-sm);
   border: 1px solid var(--line-soft);
-  min-width: 56px;
+  min-width: 52px;
   text-align: center;
+  letter-spacing: 0.03em;
 }
 .composer-input {
   flex: 1;
-  padding: 0.7rem 1rem;
-  font-size: 1rem;
+  padding: 0.6rem 0.9rem;
+  font-size: 0.95rem;
+  background: var(--bg-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  color: var(--fg);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.composer-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(255, 210, 58, 0.15);
+}
+.composer-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 .composer .btn-primary {
-  padding: 0.7rem 1.4rem;
-  font-size: 0.95rem;
+  padding: 0.6rem 1.1rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 </style>

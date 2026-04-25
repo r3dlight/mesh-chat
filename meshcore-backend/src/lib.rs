@@ -29,10 +29,10 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use mesh_core::{
     BackendHandle, ChannelInfo, ChannelRole, ChatMessage, MeshBackend, MeshCommand, MeshEvent,
-    Network, NodeInfo,
+    Network, NodeInfo, NodeKind, SendStatus,
 };
 use meshcore_rs::{events::EventPayload, EventType, MeshCore, MeshCoreEvent};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, instrument, warn};
 
 /// Baud rate used by the Meshcore companion-radio firmware on USB CDC.
@@ -70,9 +70,14 @@ impl MeshBackend for MeshcoreBackend {
 
         // The crate's default timeout is 3s, which is tight for a
         // radio that just finished re-enumerating over USB CDC after
-        // our serial open (or after a fresh flash). Bump it to 10s
-        // so every subsequent command has room to breathe.
-        mc.set_default_timeout(std::time::Duration::from_secs(10))
+        // our serial open (or after a fresh flash). Bump it to 30s.
+        // Why so long: `send_login`/`send_msg` wait for the firmware's
+        // `MsgSent` confirmation, and on a radio that's queue-full or
+        // duty-cycle-throttled (busy LoRa channel, solar repeater
+        // chain) the firmware can sit on the command for 10–20s
+        // before acking. We learnt this from `Timeout waiting for
+        // Some(MsgSent)` reports against a remote solar repeater.
+        mc.set_default_timeout(std::time::Duration::from_secs(30))
             .await;
 
         // APP_START is mandatory — the radio won't emit any events until
@@ -146,9 +151,44 @@ impl MeshBackend for MeshcoreBackend {
                 snr: None,
                 last_heard: Some(chrono::Utc::now().timestamp()),
                 hops_away: None,
+                kind: Some(NodeKind::Chat),
             }),
         )
         .await;
+
+        // Push our host system clock to the radio. Meshcore boards
+        // without a backed-up RTC drift wildly between reboots, and
+        // every OTA admin packet (login especially) carries a
+        // timestamp that the remote uses for replay-attack rejection.
+        // If our radio's clock is behind whatever timestamp the
+        // repeater last recorded for our pubkey, the repeater will
+        // silently drop the login. Setting it at connect time mirrors
+        // what the official Meshcore phone app does on each session.
+        let host_now = chrono::Utc::now().timestamp();
+        let host_now_u32 = u32::try_from(host_now).unwrap_or(u32::MAX);
+        match mc.commands().lock().await.set_time(host_now_u32).await {
+            Ok(_) => info!(
+                ts = host_now_u32,
+                "meshcore radio clock synced to host time"
+            ),
+            Err(e) => warn!(
+                error = %e,
+                "meshcore set_time failed — admin replay-guard checks may reject our requests if the radio clock drifts"
+            ),
+        }
+
+        // Auto-rebroadcast our full identity to immediate neighbours.
+        // Meshcore's firmware auto-advert cadence is long (30 min+) to
+        // save airtime, so between two cycles a neighbour that has
+        // never heard us will silently drop any DM we send — its
+        // firmware discards messages from pubkeys it doesn't have
+        // cached. The official Meshcore phone app fires the same call
+        // on every companion connect for the same reason. Zero-hop
+        // (`flood: false`) keeps the cost to one local-reach packet.
+        match mc.commands().lock().await.send_advert(false).await {
+            Ok(_) => info!("meshcore auto-advert broadcast on connect"),
+            Err(e) => warn!(error = %e, "meshcore auto-advert on connect failed; DMs to fresh neighbours may be dropped until next manual Send Advert"),
+        }
 
         // Populate the sidebar from the firmware's contact cache. Failures
         // here are non-fatal: advertisements will rebuild the list as they
@@ -308,13 +348,72 @@ impl MeshBackend for MeshcoreBackend {
         });
 
 
+        // Tracks the peer of the most recent `RepeaterLogin` command that
+        // hasn't yet been answered. Meshcore's `LoginSuccess`/`LoginFailed`
+        // packets carry no peer attribution, so we correlate by serialising
+        // logins (the UI gates the button while one is in flight) and
+        // popping the pending peer when the response lands. Wrapped in an
+        // Arc<Mutex<>> so both the event-stream task and the command task
+        // can touch it.
+        let pending_login: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
         // Event pump: meshcore-rs broadcast stream → our mpsc.
         let mc_stream = mc.clone();
         let event_tx_stream = event_tx.clone();
         let my_id_stream = my_id.clone();
+        let pending_login_stream = pending_login.clone();
         tokio::spawn(async move {
             let mut stream = mc_stream.event_stream();
             while let Some(ev) = stream.next().await {
+                // Login responses don't go through `map_event` because we
+                // need access to the pending-login state to attach the
+                // peer. Intercept them here, then fall through for
+                // everything else.
+                // Trace EVERY incoming firmware event so we can verify a
+                // login response actually reached us at the meshcore-rs
+                // layer. If `ver`/`clock` work but a login times out
+                // server-side, this log tells us whether it's:
+                //   - a true round-trip drop (no event ever logged), or
+                //   - a parsing/wiring bug on our side (event logged but
+                //     never surfaced as RepeaterLoginResult).
+                info!(
+                    event_type = ?ev.event_type,
+                    "meshcore raw event"
+                );
+                match ev.event_type {
+                    EventType::LoginSuccess | EventType::LoginFailed => {
+                        let peer = pending_login_stream.lock().await.take();
+                        if let Some(peer) = peer {
+                            let ok = matches!(ev.event_type, EventType::LoginSuccess);
+                            info!(
+                                %peer,
+                                ok,
+                                "repeater login response correlated to pending peer"
+                            );
+                            emit(
+                                &event_tx_stream,
+                                MeshEvent::RepeaterLoginResult {
+                                    network: Network::Meshcore,
+                                    peer,
+                                    ok,
+                                    error: if ok {
+                                        None
+                                    } else {
+                                        Some("repeater rejected the password".into())
+                                    },
+                                },
+                            )
+                            .await;
+                        } else {
+                            warn!(
+                                event_type = ?ev.event_type,
+                                "login response arrived with no pending login — dropped"
+                            );
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
                 for mapped in map_event(ev, &my_id_stream) {
                     emit(&event_tx_stream, mapped).await;
                 }
@@ -325,6 +424,8 @@ impl MeshBackend for MeshcoreBackend {
         // Command loop: translate our generic commands to meshcore-rs calls.
         let mc_cmd = mc.clone();
         let event_tx_cmd = event_tx.clone();
+        let my_id_cmd = my_id.clone();
+        let pending_login_cmd = pending_login.clone();
         tokio::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
                 if matches!(cmd, MeshCommand::Shutdown) {
@@ -334,7 +435,7 @@ impl MeshBackend for MeshcoreBackend {
                     }
                     break;
                 }
-                handle_cmd(&mc_cmd, cmd, &event_tx_cmd).await;
+                handle_cmd(&mc_cmd, cmd, &event_tx_cmd, &my_id_cmd, &pending_login_cmd).await;
             }
             debug!("meshcore command loop exiting");
         });
@@ -411,11 +512,20 @@ fn short_from_long(long: &str) -> String {
 }
 
 fn contact_to_node(c: &meshcore_rs::events::Contact) -> MeshEvent {
+    // Scrub garbage names from the firmware contact cache too. Normally
+    // these come through fine (the firmware stores the clean UTF-8
+    // string), but if we ever get a corrupted entry we don't want it
+    // to poison the sidebar.
+    let clean_name = if is_plausible_name(&c.adv_name) {
+        c.adv_name.clone()
+    } else {
+        String::new()
+    };
     MeshEvent::NodeSeen(NodeInfo {
         network: Network::Meshcore,
         id: c.prefix_hex(),
-        long_name: c.adv_name.clone(),
-        short_name: short_from_long(&c.adv_name),
+        long_name: clean_name.clone(),
+        short_name: short_from_long(&clean_name),
         battery_level: None,
         voltage: None,
         snr: None,
@@ -434,7 +544,51 @@ fn contact_to_node(c: &meshcore_rs::events::Contact) -> MeshEvent {
         } else {
             Some(c.path_len as u32)
         },
+        kind: Some(NodeKind::from_meshcore_byte(c.contact_type)),
     })
+}
+
+/// Returns true if `name` looks like a human-typed identifier rather
+/// than raw binary bytes surfaced as mojibake. Guards against a bug in
+/// `meshcore-rs` 0.1.10: its `Advertisement` parser reads 32 bytes at
+/// offset 6 of the packet payload as the name, but those bytes are
+/// really the timestamp + signature fields — the actual name lives
+/// further in. Result: `a.name` on full-identity adverts regularly
+/// contains binary garbage that `String::from_utf8_lossy` turns into
+/// `U+FFFD` replacement chars. We reject any name containing
+/// replacement chars, control chars, or a high ratio of non-printables.
+fn is_plausible_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // U+FFFD is the replacement char — its presence means lossy UTF-8
+    // decode found invalid bytes, which is how binary slop shows up.
+    if trimmed.contains('\u{FFFD}') {
+        return false;
+    }
+    let mut total = 0usize;
+    let mut suspicious = 0usize;
+    for ch in trimmed.chars() {
+        total += 1;
+        // Any C0 control char (except tab) is a strong signal of binary data.
+        if (ch.is_control() && ch != '\t') || ch == '\u{FEFF}' {
+            return false;
+        }
+        // Count characters that are neither letters, digits, nor common
+        // punctuation/emoji as "suspicious". Pure binary tends to be
+        // ~100% suspicious; a real node name is ~0%.
+        if !(ch.is_alphanumeric()
+            || ch.is_whitespace()
+            || "-_./:()[]!?@+*#&',\"".contains(ch)
+            || ch as u32 >= 0x2000) // emoji / ext punctuation
+        {
+            suspicious += 1;
+        }
+    }
+    // Tolerate up to 25% suspicious chars — real names sometimes have odd
+    // symbols, binary slop is dense.
+    suspicious * 4 <= total
 }
 
 /// Accepts a u32 "seconds" value only if it looks like a unix epoch
@@ -465,11 +619,31 @@ fn map_event(ev: MeshCoreEvent, my_id: &str) -> Vec<MeshEvent> {
             network: Network::Meshcore,
         }],
         (EventType::ContactMsgRecv, EP::ContactMessage(msg)) => {
+            // Drop firmware echoes of our own outgoing messages. Some
+            // Meshcore firmware versions replay every queued send back
+            // to the companion as `ContactMsgRecv` with sender_prefix =
+            // our own pubkey, presumably as a "yes I sent it" cue. We
+            // already render outgoing DMs through `send_text`'s
+            // synthetic local echo, so accepting these would double
+            // the bubble in the chat thread.
+            let sender = msg.sender_prefix_hex();
+            if sender == my_id {
+                info!(
+                    %sender,
+                    "dropping firmware echo of our own ContactMsg (already rendered via local echo)"
+                );
+                return vec![];
+            }
+            info!(
+                %sender,
+                text_len = msg.text.len(),
+                "ContactMsgRecv → TextMessage (incoming DM from peer)"
+            );
             vec![MeshEvent::TextMessage(ChatMessage {
                 timestamp: chrono::Utc::now().timestamp(),
                 network: Network::Meshcore,
                 channel: 0,
-                from: msg.sender_prefix_hex(),
+                from: sender,
                 to: my_id.to_string(),
                 text: msg.text,
                 local_id: None,
@@ -530,7 +704,7 @@ fn map_event(ev: MeshCoreEvent, my_id: &str) -> Vec<MeshEvent> {
             if let Some(pos) = position_from_advertisement(&a) {
                 out.push(pos);
             }
-            if !a.name.trim().is_empty() {
+            if is_plausible_name(&a.name) {
                 out.push(MeshEvent::NodeSeen(NodeInfo {
                     network: Network::Meshcore,
                     id: bytes_hex(&a.prefix),
@@ -541,11 +715,17 @@ fn map_event(ev: MeshCoreEvent, my_id: &str) -> Vec<MeshEvent> {
                     snr: None,
                     last_heard: Some(chrono::Utc::now().timestamp()),
                     hops_away: None,
+                    // `AdvertisementData` doesn't carry contact_type in
+                    // meshcore-rs 0.1.10. The contact-cache path
+                    // (`contact_to_node`) will fill this in once the
+                    // firmware stores the peer, so `None` here is fine.
+                    kind: None,
                 }));
             } else {
                 debug!(
                     prefix = %bytes_hex(&a.prefix),
-                    "path-only advert dropped (no identity)"
+                    name_bytes = a.name.len(),
+                    "advert dropped — name empty or looks like binary (meshcore-rs 0.1.10 advert parser offset bug)"
                 );
             }
             out
@@ -595,14 +775,20 @@ fn bytes_hex(bytes: &[u8]) -> String {
     out
 }
 
-async fn handle_cmd(mc: &Arc<MeshCore>, cmd: MeshCommand, event_tx: &mpsc::Sender<MeshEvent>) {
+async fn handle_cmd(
+    mc: &Arc<MeshCore>,
+    cmd: MeshCommand,
+    event_tx: &mpsc::Sender<MeshEvent>,
+    my_id: &str,
+    pending_login: &Arc<Mutex<Option<String>>>,
+) {
     match cmd {
         MeshCommand::SendText {
             local_id,
             channel,
             text,
             to,
-        } => send_text(mc, local_id, channel, text, to, event_tx).await,
+        } => send_text(mc, local_id, channel, text, to, event_tx, my_id).await,
         MeshCommand::UpdateUser { long_name, .. } => {
             // Meshcore stores a single advertised name; short_name is a
             // Meshtastic-only concept and is dropped here.
@@ -747,6 +933,281 @@ async fn handle_cmd(mc: &Arc<MeshCore>, cmd: MeshCommand, event_tx: &mpsc::Sende
                 }
             }
         }
+        MeshCommand::ForgetNode { id } => {
+            let prefix_bytes = match parse_hex_prefix(&id) {
+                Some(b) => b,
+                None => {
+                    send_err(
+                        event_tx,
+                        format!("invalid node id {}: expect 12 hex chars", id),
+                    )
+                    .await;
+                    return;
+                }
+            };
+            // meshcore-rs 0.1.10's `remove_contact()` sends CMD_REMOVE_CONTACT
+            // followed by only the 6-byte prefix, but the wire format (per
+            // its own doc comment) is `[0x0F][pubkey: 32]`. Firmware silently
+            // keeps the contact when it gets 6 bytes instead of 32, so the
+            // "forget" looks successful while the cache stays untouched.
+            // Bypass the crate and issue the raw command ourselves with the
+            // full 32-byte public key.
+            let contact = mc.get_contact_by_prefix(&prefix_bytes).await;
+            let Some(contact) = contact else {
+                send_err(
+                    event_tx,
+                    format!("forget node: no known Meshcore contact with prefix {}", id),
+                )
+                .await;
+                return;
+            };
+            // CMD_REMOVE_CONTACT = 0x0F. Wait for either `Ok` (firmware
+            // removed the contact) or `Error` (firmware couldn't find /
+            // remove it). Without `send_multi` we'd block on `Ok` only
+            // and the user-facing forget would silently time out at 30s
+            // when the firmware actually did respond — just with an
+            // error frame rather than the OK frame meshcore-rs expected.
+            let mut raw = Vec::with_capacity(1 + 32);
+            raw.push(0x0F);
+            raw.extend_from_slice(&contact.public_key);
+            let result = mc
+                .commands()
+                .lock()
+                .await
+                .send_multi(
+                    &raw,
+                    &[meshcore_rs::EventType::Ok, meshcore_rs::EventType::Error],
+                    std::time::Duration::from_secs(15),
+                )
+                .await;
+            match result {
+                Ok(ev) if ev.event_type == meshcore_rs::EventType::Ok => {
+                    info!(%id, pubkey_prefix = %bytes_hex(&contact.public_key[..6]), "meshcore CMD_REMOVE_CONTACT acked OK by firmware");
+                    // Refresh meshcore-rs's in-memory contact cache so a
+                    // subsequent `send_msg` doesn't find a stale entry
+                    // for the deleted peer. The library only re-populates
+                    // on explicit `get_contacts()`.
+                    match mc.commands().lock().await.get_contacts(0).await {
+                        Ok(contacts) => {
+                            debug!(
+                                count = contacts.len(),
+                                "meshcore contact cache rehydrated after forget"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "get_contacts after remove failed (non-fatal)");
+                        }
+                    }
+                    emit(
+                        event_tx,
+                        MeshEvent::NodeRemoved {
+                            network: Network::Meshcore,
+                            id,
+                        },
+                    )
+                    .await;
+                }
+                Ok(ev) => {
+                    // EventType::Error — firmware couldn't find the contact
+                    // by the pubkey we sent. This typically means our
+                    // copy of `contact.public_key` is partial/zero (the
+                    // firmware only ever heard a path-advert for this
+                    // peer, no full identity), or the contact was
+                    // already gone.
+                    let detail = match ev.payload {
+                        meshcore_rs::events::EventPayload::String(s) => s,
+                        _ => "ERR_NOT_FOUND or unable to remove".into(),
+                    };
+                    warn!(
+                        %id,
+                        pubkey_prefix = %bytes_hex(&contact.public_key[..6]),
+                        pubkey_zero = contact.public_key.iter().all(|&b| b == 0),
+                        %detail,
+                        "meshcore CMD_REMOVE_CONTACT rejected by firmware"
+                    );
+                    send_err(
+                        event_tx,
+                        format!(
+                            "forget node {}: firmware rejected — {} (often: only a path-advert was heard for this peer, full pubkey unknown)",
+                            id, detail
+                        ),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    warn!(%id, error = %e, "meshcore remove_contact raw send failed");
+                    send_err(event_tx, format!("forget node: {}", e)).await;
+                }
+            }
+        }
+        MeshCommand::SendAdvert { flood } => {
+            // Rebroadcast our full identity so neighbours add us to their
+            // contact cache. Critical for DMs: Meshcore silently drops
+            // messages signed by an unknown sender pubkey, so if the
+            // remote never heard our advert, nothing we send will render
+            // on their screen.
+            match mc.commands().lock().await.send_advert(flood).await {
+                Ok(_) => {
+                    info!(flood, "meshcore advert broadcast accepted");
+                    send_err(
+                        event_tx,
+                        if flood {
+                            "advert broadcast (flood) — give neighbours ~10s to cache our identity".into()
+                        } else {
+                            "advert broadcast (zero-hop) — immediate neighbours only".into()
+                        },
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    warn!(error = %e, "meshcore send_advert failed");
+                    send_err(event_tx, format!("send advert: {}", e)).await;
+                }
+            }
+        }
+        MeshCommand::RepeaterLogin { peer, password } => {
+            let prefix_bytes = match parse_hex_prefix(&peer) {
+                Some(b) => b,
+                None => {
+                    send_err(
+                        event_tx,
+                        format!("invalid peer id {}: expect 12 hex chars", peer),
+                    )
+                    .await;
+                    return;
+                }
+            };
+            let Some(contact) = mc.get_contact_by_prefix(&prefix_bytes).await else {
+                send_err(
+                    event_tx,
+                    format!("login: no Meshcore contact with prefix {}", peer),
+                )
+                .await;
+                return;
+            };
+            // Refuse to overwrite a pending login: the firmware emits
+            // unattributed `LoginSuccess`/`LoginFailed` and we'd
+            // otherwise misroute the response.
+            {
+                let mut slot = pending_login.lock().await;
+                if slot.is_some() {
+                    send_err(
+                        event_tx,
+                        "another repeater login is already in flight — wait for the response".into(),
+                    )
+                    .await;
+                    return;
+                }
+                *slot = Some(peer.clone());
+            }
+            match mc
+                .commands()
+                .lock()
+                .await
+                .send_login(contact, &password)
+                .await
+            {
+                Ok(info) => {
+                    info!(
+                        %peer,
+                        expected_ack = ?info.expected_ack,
+                        "meshcore login request accepted by radio (awaiting LoginSuccess/Failed)"
+                    );
+                    // Watchdog: the repeater's LoginSuccess/Failed comes
+                    // through the event stream asynchronously, but on a
+                    // distant or solar-powered repeater it can never
+                    // arrive (no LoS, asleep, wrong path). Without a
+                    // safety net the UI button would stay stuck on
+                    // "Authenticating…" forever. After 45 s we evict
+                    // the pending slot and surface a timeout — the user
+                    // gets a clear failure they can act on.
+                    let pending_login_watchdog = pending_login.clone();
+                    let event_tx_watchdog = event_tx.clone();
+                    let peer_watchdog = peer.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+                        let mut slot = pending_login_watchdog.lock().await;
+                        if slot.as_deref() == Some(peer_watchdog.as_str()) {
+                            *slot = None;
+                            drop(slot);
+                            warn!(%peer_watchdog, "login response timed out (no LoginSuccess/Failed in 45s)");
+                            emit(
+                                &event_tx_watchdog,
+                                MeshEvent::RepeaterLoginResult {
+                                    network: Network::Meshcore,
+                                    peer: peer_watchdog,
+                                    ok: false,
+                                    error: Some(
+                                    "no LoginSuccess/Failed in 45s. MeshCore repeaters silently drop wrong passwords — most likely cause: \
+                                     bad password (default build = \"password\"), our pubkey not in the repeater's ACL, \
+                                     or local clock behind the repeater's last-seen timestamp for us (NTP fix)."
+                                        .into(),
+                                ),
+                                },
+                            )
+                            .await;
+                        }
+                    });
+                }
+                Err(e) => {
+                    warn!(%peer, error = %e, "meshcore send_login failed");
+                    *pending_login.lock().await = None;
+                    emit(
+                        event_tx,
+                        MeshEvent::RepeaterLoginResult {
+                            network: Network::Meshcore,
+                            peer,
+                            ok: false,
+                            error: Some(format!("send login: {}", e)),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+        MeshCommand::RepeaterLogout { peer } => {
+            let prefix_bytes = match parse_hex_prefix(&peer) {
+                Some(b) => b,
+                None => {
+                    send_err(
+                        event_tx,
+                        format!("invalid peer id {}: expect 12 hex chars", peer),
+                    )
+                    .await;
+                    return;
+                }
+            };
+            let Some(contact) = mc.get_contact_by_prefix(&prefix_bytes).await else {
+                send_err(
+                    event_tx,
+                    format!("logout: no Meshcore contact with prefix {}", peer),
+                )
+                .await;
+                return;
+            };
+            match mc.commands().lock().await.send_logout(contact).await {
+                Ok(_) => {
+                    info!(%peer, "meshcore logout sent");
+                    // Reuse RepeaterLoginResult with ok=false to signal
+                    // "session no longer active" — the UI flips its
+                    // logged-in flag on either kind of result.
+                    emit(
+                        event_tx,
+                        MeshEvent::RepeaterLoginResult {
+                            network: Network::Meshcore,
+                            peer,
+                            ok: false,
+                            error: Some("logged out".into()),
+                        },
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    warn!(%peer, error = %e, "meshcore send_logout failed");
+                    send_err(event_tx, format!("logout: {}", e)).await;
+                }
+            }
+        }
         MeshCommand::Shutdown => {
             // Handled in the outer loop — the match arm here is unreachable
             // unless the outer dispatcher changes. Keep it explicit so
@@ -764,6 +1225,7 @@ async fn send_text(
     text: String,
     to: Option<String>,
     event_tx: &mpsc::Sender<MeshEvent>,
+    my_id: &str,
 ) {
     if let Some(peer) = to {
         // DM: look up a known contact by 6-byte prefix.
@@ -784,20 +1246,91 @@ async fn send_text(
             send_failure(
                 event_tx,
                 local_id,
-                format!("no known meshcore contact with prefix {}", peer),
+                format!(
+                    "no known Meshcore contact with prefix {} — hit 🔄 Refresh in Nodes, or have the remote re-advertise",
+                    peer
+                ),
             )
             .await;
             return;
         };
+        // Guard against sending to a half-known contact. If the firmware
+        // only ever heard a path-advert and never a full-identity advert
+        // for this peer, its public_key field will be zero-filled — which
+        // means pubkey-based encryption would send gibberish nobody can
+        // decrypt. Surface that clearly instead of silently emitting a
+        // dead message the remote will never see.
+        if contact.public_key.iter().all(|&b| b == 0) {
+            send_failure(
+                event_tx,
+                local_id,
+                format!(
+                    "contact {} has no full identity yet — ask the remote to Send Advert and retry",
+                    peer
+                ),
+            )
+            .await;
+            return;
+        }
         let name = contact.adv_name.clone();
+        let peer_id = peer.clone();
+        let send_text = text.clone();
+        let path_len = contact.path_len;
+        let pubkey_prefix = bytes_hex(&contact.public_key[..6]);
         match mc.commands().lock().await.send_msg(contact, &text, None).await {
             Ok(info) => {
                 info!(
                     local_id,
                     peer = %name,
+                    peer_id = %pubkey_prefix,
+                    path_len,
                     expected_ack = ?info.expected_ack,
+                    suggested_timeout_ms = info.suggested_timeout,
                     "meshcore DM accepted by radio"
                 );
+                if path_len < 0 {
+                    // No cached route — the firmware will flood the message.
+                    // Surface this so the user understands why delivery may
+                    // take 10–30 s the first time (and may fail if the
+                    // remote radio isn't within flood range).
+                    send_err(
+                        event_tx,
+                        format!(
+                            "no known path to {} yet — message flooded; first DM can take 10-30s, after that the path caches",
+                            name
+                        ),
+                    )
+                    .await;
+                }
+                // Local echo: Meshcore's companion protocol doesn't replay
+                // our own transmit back to us (unlike Meshtastic's
+                // PacketRouter), so the UI needs a synthetic TextMessage
+                // to render the bubble in our own DM thread.
+                info!(
+                    local_id,
+                    peer = %peer_id,
+                    text_len = send_text.len(),
+                    "emitting DM local-echo (1 per send_text call)"
+                );
+                emit(
+                    event_tx,
+                    MeshEvent::TextMessage(ChatMessage {
+                        timestamp: chrono::Utc::now().timestamp(),
+                        network: Network::Meshcore,
+                        channel: 0,
+                        from: my_id.to_string(),
+                        to: peer_id,
+                        text: send_text,
+                        local_id: Some(local_id),
+                        status: Some(SendStatus::Sent),
+                        rx_snr: None,
+                        rx_rssi: None,
+                        reply_to_text: None,
+                        packet_id: None,
+                        reactions: std::collections::HashMap::new(),
+                    }),
+                )
+                .await;
                 emit(
                     event_tx,
                     MeshEvent::SendResult {
@@ -832,6 +1365,7 @@ async fn send_text(
             return;
         }
     };
+    let channel_text = text.clone();
     match mc
         .commands()
         .lock()
@@ -841,6 +1375,26 @@ async fn send_text(
     {
         Ok(()) => {
             info!(local_id, channel = chan_idx, "meshcore channel msg accepted");
+            // Local echo for channel sends — same reasoning as DMs.
+            emit(
+                event_tx,
+                MeshEvent::TextMessage(ChatMessage {
+                    timestamp: chrono::Utc::now().timestamp(),
+                    network: Network::Meshcore,
+                    channel: u32::from(chan_idx),
+                    from: my_id.to_string(),
+                    to: "^all".into(),
+                    text: channel_text,
+                    local_id: Some(local_id),
+                    status: Some(SendStatus::Sent),
+                    rx_snr: None,
+                    rx_rssi: None,
+                    reply_to_text: None,
+                    packet_id: None,
+                    reactions: std::collections::HashMap::new(),
+                }),
+            )
+            .await;
             emit(
                 event_tx,
                 MeshEvent::SendResult {
@@ -1026,5 +1580,32 @@ mod tests {
         let b = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
         assert_eq!(bytes_hex(&b), "aabbccddeeff");
         assert_eq!(bytes_hex(&b), hex_prefix(&b));
+    }
+
+    #[test]
+    fn plausible_name_accepts_normal_names() {
+        assert!(is_plausible_name("redble"));
+        assert!(is_plausible_name("Alpha Bravo"));
+        assert!(is_plausible_name("node-42"));
+        assert!(is_plausible_name("chez_moi"));
+        assert!(is_plausible_name("📡 relay"));
+    }
+
+    #[test]
+    fn plausible_name_rejects_binary_slop() {
+        // The exact symptom reported: meshcore-rs 0.1.10 decodes
+        // signature bytes as lossy UTF-8, producing replacement chars.
+        let mojibake = "\u{FFFD}\u{FFFD}}\u{FFFD}N\"\u{FFFD}\u{FFFD}]l\u{FFFD}t\u{FFFD}A\u{FFFD}\u{FFFD}{\u{FFFD}m6g)\u{FFFD}\u{FFFD}";
+        assert!(!is_plausible_name(mojibake));
+        // Raw binary re-decoded — should also be rejected.
+        let raw = String::from_utf8_lossy(&[0xff, 0x12, 0x00, 0x7d, 0x4e]).to_string();
+        assert!(!is_plausible_name(&raw));
+    }
+
+    #[test]
+    fn plausible_name_rejects_empty_and_whitespace() {
+        assert!(!is_plausible_name(""));
+        assert!(!is_plausible_name("   "));
+        assert!(!is_plausible_name("\t\n"));
     }
 }

@@ -186,6 +186,23 @@ async fn main() -> anyhow::Result<()> {
                     enabled, address, map_reporting_enabled
                 );
             }
+            MeshEvent::NodeRemoved { network, id } => {
+                println!("[NODE-REMOVED {}] {}", network.as_str(), id);
+            }
+            MeshEvent::RepeaterLoginResult {
+                network,
+                peer,
+                ok,
+                error,
+            } => {
+                println!(
+                    "[LOGIN {}] peer={} ok={} err={:?}",
+                    network.as_str(),
+                    peer,
+                    ok,
+                    error
+                );
+            }
         }
     }
     Ok(())

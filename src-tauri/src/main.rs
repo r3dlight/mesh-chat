@@ -360,6 +360,8 @@ async fn connect_device(
                 MeshEvent::Disconnected { .. } => "Disconnected",
                 MeshEvent::TextMessage(_) => "TextMessage",
                 MeshEvent::NodeSeen(_) => "NodeSeen",
+                MeshEvent::NodeRemoved { .. } => "NodeRemoved",
+                MeshEvent::RepeaterLoginResult { .. } => "RepeaterLoginResult",
                 MeshEvent::ChannelInfo(_) => "ChannelInfo",
                 MeshEvent::LoraInfo(_) => "LoraInfo",
                 MeshEvent::DeviceRoleInfo(_) => "DeviceRoleInfo",
@@ -432,26 +434,19 @@ async fn send_text(
     .map_err(|e| e.to_string())?;
     drop(tx_guard);
 
-    let my_id = state.my_id.lock().await.clone();
-    let msg = ChatMessage {
-        timestamp: chrono::Utc::now().timestamp(),
-        network: Network::Meshtastic,
-        channel,
-        from: my_id.clone().unwrap_or_else(|| "me".into()),
-        to: to.clone().unwrap_or_else(|| "^all".into()),
-        text,
-        local_id: Some(local_id),
-        status: Some(mesh_core::SendStatus::Sending),
-        rx_snr: None,
-        rx_rssi: None,
-        reply_to_text,
-        packet_id: None,
-        reactions: std::collections::HashMap::new(),
-    };
-    if let Some(h) = state.history.lock().await.as_mut() {
-        h.record(&msg);
-    }
-    emit_mesh_event(&app, &MeshEvent::TextMessage(msg));
+    // No synthetic local-echo here. Both backends now emit their own
+    // outgoing-bubble TextMessage on success (Meshtastic via the
+    // PacketRouter loopback, Meshcore via an explicit synthesized event
+    // in `meshcore_backend::send_text`), so emitting another one here
+    // produced two bubbles for every send. The history is recorded by
+    // the webview forwarder when the backend's TextMessage comes
+    // through, not from this command. The `reply_to_text` parameter
+    // is consumed when building `wire_text` above; a quoted preview on
+    // our own bubble is reconstructed by the receiving side from the
+    // `> quote\n` prefix.
+    let _ = reply_to_text;
+    let _ = text;
+    let _ = app;
     Ok(local_id)
 }
 
@@ -808,6 +803,71 @@ async fn refresh_nodes(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     Ok(())
 }
 
+/// Rebroadcast our own full-identity advertisement (Meshcore only).
+/// Use this when a remote can't receive our DMs — it usually means
+/// the remote doesn't have our pubkey cached, and a fresh advert lets
+/// it add us to its contact table.
+#[tauri::command]
+async fn send_advert(
+    flood: bool,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let tx = state.cmd_tx.lock().await;
+    let tx = tx.as_ref().ok_or("not connected")?;
+    tx.send(MeshCommand::SendAdvert { flood })
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Remove a node from the radio's contact cache (Meshcore only).
+/// UI should confirm with the user first since there's no undo on the
+/// firmware side — the node will reappear only if it advertises again.
+#[tauri::command]
+async fn forget_node(
+    id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let tx = state.cmd_tx.lock().await;
+    let tx = tx.as_ref().ok_or("not connected")?;
+    tx.send(MeshCommand::ForgetNode { id })
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Log into a Meshcore repeater or room server with its admin password.
+/// The session lasts ~10–15 min on the firmware before the user has to
+/// re-authenticate. Reply lands as a `RepeaterLoginResult` event the UI
+/// listens to.
+#[tauri::command]
+async fn repeater_login(
+    peer: String,
+    password: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let tx = state.cmd_tx.lock().await;
+    let tx = tx.as_ref().ok_or("not connected")?;
+    tx.send(MeshCommand::RepeaterLogin { peer, password })
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Tear down an active admin session with a Meshcore repeater.
+#[tauri::command]
+async fn repeater_logout(
+    peer: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let tx = state.cmd_tx.lock().await;
+    let tx = tx.as_ref().ok_or("not connected")?;
+    tx.send(MeshCommand::RepeaterLogout { peer })
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Write WiFi credentials to the radio. Empty PSK = open network.
 /// Caller must have shown a confirm dialog since changing WiFi
 /// settings reboots the firmware.
@@ -1039,6 +1099,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             set_network_config,
             set_mqtt_config,
             refresh_nodes,
+            send_advert,
+            forget_node,
+            repeater_login,
+            repeater_logout,
             clear_history,
             shutdown,
         ])
