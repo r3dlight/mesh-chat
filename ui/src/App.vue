@@ -830,11 +830,18 @@ function channelPrivacyTag(info, index) {
 
 // Nodes modal: sorted list with "Start DM" action.
 const sortedNodes = computed(() => {
-  return Object.values(nodes.value).sort((a, b) => {
-    const at = a.last_heard || 0;
-    const bt = b.last_heard || 0;
-    return bt - at;
-  });
+  return Object.values(nodes.value)
+    // Filter synthetic `chan{N}` placeholders. Meshcore channel messages
+    // arrive without sender attribution, so we tag them with a `chan{N}`
+    // pseudo-id for the bubble label — but those aren't real nodes; they
+    // shouldn't pollute the Nodes modal (no DM target, no forget target,
+    // no signal data we can attribute to anyone in particular).
+    .filter((n) => !/^chan\d+$/.test(n.id || ""))
+    .sort((a, b) => {
+      const at = a.last_heard || 0;
+      const bt = b.last_heard || 0;
+      return bt - at;
+    });
 });
 
 function openRadioPanel() {
@@ -1027,16 +1034,21 @@ function isLoggedIn(peerId) {
 }
 
 async function forgetNode(id) {
+  console.log("[mesh-chat] forgetNode CLICK id=", id);
   const n = nodes.value[id];
   const label = n?.long_name?.trim() || id;
   const ok = window.confirm(
     `Forget "${label}" (${id})?\n\nThis removes it from the radio's contact cache. The node will only reappear if it advertises again. Aliases and DM history stay untouched.`
   );
+  console.log("[mesh-chat] forgetNode confirm result=", ok);
   if (!ok) return;
   try {
+    console.log("[mesh-chat] forgetNode invoke forget_node", { id });
     await invoke("forget_node", { id });
+    console.log("[mesh-chat] forgetNode invoke returned OK");
     status.value = `forget: requested removal of ${label}`;
   } catch (e) {
+    console.error("[mesh-chat] forgetNode invoke threw", e);
     status.value = `forget error: ${e}`;
   }
 }
@@ -1527,7 +1539,12 @@ function handleMeshEvent(evt) {
     // Stash the per-packet SNR / RSSI on the sender's node entry so
     // the Nodes modal can show an up-to-date signal estimate even
     // between NodeInfo broadcasts (which are rare on Meshtastic).
-    if (!isMe && m.from && (m.rx_snr != null || m.rx_rssi != null)) {
+    // Skip synthetic `chan{N}` ids: those are placeholders for
+    // anonymous Meshcore channel senders, attaching signal data to
+    // them would be meaningless and would create fake "nodes" the
+    // user can't DM or forget.
+    const isSyntheticChan = /^chan\d+$/.test(m.from || "");
+    if (!isMe && !isSyntheticChan && m.from && (m.rx_snr != null || m.rx_rssi != null)) {
       const existing = nodes.value[m.from] || { id: m.from };
       nodes.value = {
         ...nodes.value,
